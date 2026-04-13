@@ -1,0 +1,15 @@
+{
+  "name": "nhtsaRecalls",
+  "supportEmail": "tylerscott@geotab.com",
+  "version": "1.0.0",
+  "items": [
+    {
+      "url": "https://tylerscottgt.github.io/myg-nhtsa-recalls/index.html?v=1",
+      "path": "ComplianceId/",
+      "menuName": {
+        "en": "NHTSA Recall Dashboard"
+      }
+    }
+  ],
+  "isSigned": false
+}

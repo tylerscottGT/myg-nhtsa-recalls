@@ -1,0 +1,807 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NHTSA Recall Dashboard</title>
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+</head>
+<body>
+
+<div id="nhtsa-app">
+
+  <div class="nhtsa-page-header">
+    <div class="nhtsa-header-left">
+      <h1>NHTSA Recall Dashboard</h1>
+      <p>Real-time safety recall monitoring &mdash; fleet-wide NHTSA data</p>
+    </div>
+    <div class="nhtsa-header-right">
+      <button id="nhtsa-scan-btn" class="nhtsa-btn nhtsa-btn-primary">&#9654; Scan Fleet</button>
+      <button id="nhtsa-export-btn" class="nhtsa-btn nhtsa-btn-success" disabled>&#11015; Export CSV</button>
+    </div>
+  </div>
+
+  <div class="nhtsa-stat-cards">
+    <div class="nhtsa-stat-card">
+      <div class="nhtsa-stat-label">Vehicles Scanned</div>
+      <div class="nhtsa-stat-value" id="nhtsa-stat-scanned">&mdash;</div>
+    </div>
+    <div class="nhtsa-stat-card">
+      <div class="nhtsa-stat-label">Vehicles Affected</div>
+      <div class="nhtsa-stat-value" id="nhtsa-stat-affected">&mdash;</div>
+    </div>
+    <div class="nhtsa-stat-card">
+      <div class="nhtsa-stat-label">Unique Recall Campaigns</div>
+      <div class="nhtsa-stat-value" id="nhtsa-stat-recalls">&mdash;</div>
+    </div>
+    <div class="nhtsa-stat-card nhtsa-stat-card-alert">
+      <div class="nhtsa-stat-label">&#9888; Park-It Alerts</div>
+      <div class="nhtsa-stat-value" id="nhtsa-stat-parkit">&mdash;</div>
+    </div>
+  </div>
+
+  <div id="nhtsa-progress-wrap" style="display:none">
+    <div class="nhtsa-progress-bg">
+      <div id="nhtsa-progress-bar" class="nhtsa-progress-bar" style="width:0%"></div>
+    </div>
+    <div id="nhtsa-progress-label" class="nhtsa-progress-label">Starting scan&hellip;</div>
+  </div>
+
+  <div id="nhtsa-status" style="display:none"></div>
+
+  <div class="nhtsa-tabs">
+    <button class="nhtsa-tab active" data-tab="fleet">Fleet Overview</button>
+    <button class="nhtsa-tab" data-tab="recalls">Recall Details</button>
+    <button class="nhtsa-tab" data-tab="search">Manual Search</button>
+  </div>
+
+  <!-- Fleet Overview Panel -->
+  <div id="nhtsa-panel-fleet" class="nhtsa-panel">
+    <div id="nhtsa-fleet-table-wrap" class="nhtsa-table-wrap">
+      <p class="nhtsa-empty">Click <strong>Scan Fleet</strong> to check your vehicles for open NHTSA recalls.</p>
+    </div>
+  </div>
+
+  <!-- Recall Details Panel -->
+  <div id="nhtsa-panel-recalls" class="nhtsa-panel" style="display:none">
+    <div id="nhtsa-recalls-table-wrap" class="nhtsa-table-wrap">
+      <p class="nhtsa-empty">No recall data yet. Run a fleet scan first.</p>
+    </div>
+  </div>
+
+  <!-- Manual Search Panel -->
+  <div id="nhtsa-panel-search" class="nhtsa-panel" style="display:none">
+    <div class="nhtsa-card">
+      <div class="nhtsa-search-block">
+        <div class="nhtsa-search-block-title">Search by VIN</div>
+        <div class="nhtsa-search-row">
+          <input type="text" id="nhtsa-vin-input" class="nhtsa-input" placeholder="Enter 17-character VIN" maxlength="17" autocomplete="off">
+          <button id="nhtsa-vin-search-btn" class="nhtsa-btn nhtsa-btn-primary">Search</button>
+        </div>
+      </div>
+      <div class="nhtsa-search-divider">— or search by vehicle details —</div>
+      <div class="nhtsa-search-block">
+        <div class="nhtsa-search-block-title">Search by Make / Model / Year</div>
+        <div class="nhtsa-search-row">
+          <input type="text" id="nhtsa-make-input" class="nhtsa-input" placeholder="Make (e.g. Ford)" autocomplete="off">
+          <input type="text" id="nhtsa-model-input" class="nhtsa-input" placeholder="Model (e.g. F-150)" autocomplete="off">
+          <input type="number" id="nhtsa-year-input" class="nhtsa-input nhtsa-input-year" placeholder="Year" min="1980" max="2030" autocomplete="off">
+          <button id="nhtsa-mmy-search-btn" class="nhtsa-btn nhtsa-btn-primary">Search</button>
+        </div>
+      </div>
+    </div>
+    <div id="nhtsa-search-result-wrap" class="nhtsa-table-wrap" style="margin-top:12px">
+      <p class="nhtsa-empty">Enter a VIN or make/model/year above to search for recalls.</p>
+    </div>
+  </div>
+
+</div><!-- #nhtsa-app -->
+
+<script>
+/* global geotab */
+'use strict';
+
+window.geotab = window.geotab || {};
+window.geotab.addin = window.geotab.addin || {};
+
+window.geotab.addin.nhtsaRecalls = function () {
+
+  var api, state;
+  var fleetData   = [];   // [{name, vin, make, model, modelYear, recalls, hasParkIt, hasParkOutside}]
+  var scanning    = false;
+  var activeTab   = 'fleet';
+
+  // ── Lifecycle ──────────────────────────────────────────────────────────────
+  return {
+    initialize: function (fa, fs, cb) {
+      api = fa; state = fs;
+      injectStyles();
+      wireEvents();
+      cb();
+    },
+    focus: function (fa, fs) { api = fa; state = fs; },
+    blur:  function () {}
+  };
+
+  // ── DOM helpers ────────────────────────────────────────────────────────────
+  function el(id)        { return document.getElementById(id); }
+  function escHtml(str)  { return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+  // ── Progress & Status ──────────────────────────────────────────────────────
+  function showProgress(pct, msg) {
+    var wrap = el('nhtsa-progress-wrap');
+    var bar  = el('nhtsa-progress-bar');
+    var lbl  = el('nhtsa-progress-label');
+    wrap.style.display = 'block';
+    bar.style.width = Math.min(pct, 100) + '%';
+    lbl.textContent = msg;
+  }
+
+  function hideProgress() {
+    el('nhtsa-progress-wrap').style.display = 'none';
+  }
+
+  function showStatus(type, msg) {
+    var div = el('nhtsa-status');
+    div.className = 'nhtsa-status nhtsa-status-' + type;
+    div.innerHTML = escHtml(msg);
+    div.style.display = 'flex';
+  }
+
+  function hideStatus() {
+    el('nhtsa-status').style.display = 'none';
+  }
+
+  function updateStat(id, val) {
+    var e = el('nhtsa-stat-' + id);
+    if (e) e.textContent = String(val);
+  }
+
+  function lockScanBtn(locked) {
+    var b = el('nhtsa-scan-btn');
+    if (!b) return;
+    b.disabled = locked;
+    b.textContent = locked ? '⟳ Scanning…' : '▶ Scan Fleet';
+  }
+
+  // ── Event wiring ───────────────────────────────────────────────────────────
+  function wireEvents() {
+    var scanBtn   = el('nhtsa-scan-btn');
+    var exportBtn = el('nhtsa-export-btn');
+    var tabs      = document.querySelectorAll('#nhtsa-app .nhtsa-tab');
+
+    if (scanBtn)   scanBtn.addEventListener('click', function () { if (!scanning) scanFleet(); });
+    if (exportBtn) exportBtn.addEventListener('click', exportCSV);
+
+    tabs.forEach(function (tab) {
+      tab.addEventListener('click', function () {
+        tabs.forEach(function (t) { t.className = 'nhtsa-tab'; });
+        tab.className = 'nhtsa-tab active';
+        activeTab = tab.getAttribute('data-tab');
+        ['fleet','recalls','search'].forEach(function (name) {
+          var panel = el('nhtsa-panel-' + name);
+          if (panel) panel.style.display = (name === activeTab) ? 'block' : 'none';
+        });
+      });
+    });
+
+    var vinBtn = el('nhtsa-vin-search-btn');
+    var mmyBtn = el('nhtsa-mmy-search-btn');
+    if (vinBtn) vinBtn.addEventListener('click', searchByVIN);
+    if (mmyBtn) mmyBtn.addEventListener('click', searchByMMY);
+
+    var vinInput = el('nhtsa-vin-input');
+    if (vinInput) vinInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') searchByVIN(); });
+
+    var mmyInputs = [el('nhtsa-make-input'), el('nhtsa-model-input'), el('nhtsa-year-input')];
+    mmyInputs.forEach(function (inp) {
+      if (inp) inp.addEventListener('keydown', function (e) { if (e.key === 'Enter') searchByMMY(); });
+    });
+  }
+
+  // ── Fleet Scan ─────────────────────────────────────────────────────────────
+  function scanFleet() {
+    scanning = true;
+    lockScanBtn(true);
+    hideStatus();
+    fleetData = [];
+    el('nhtsa-export-btn').disabled = true;
+    updateStat('scanned', '…');
+    updateStat('affected', '…');
+    updateStat('recalls', '…');
+    updateStat('parkit', '…');
+    showProgress(2, 'Loading vehicles from fleet…');
+
+    api.call(
+      'Get',
+      { typeName: 'Device', resultsLimit: 5000 },
+      function (devices) {
+        var withVin = (devices || []).filter(function (d) {
+          return d.vehicleIdentificationNumber && d.vehicleIdentificationNumber.replace(/\s/g,'').length >= 6;
+        });
+        var missingVinCount = (devices || []).length - withVin.length;
+
+        if (withVin.length === 0) {
+          showStatus('warning', 'No vehicles with VINs found in the database. Add VINs to vehicle records under Administration > Vehicles.');
+          lockScanBtn(false);
+          scanning = false;
+          hideProgress();
+          updateStat('scanned', 0);
+          return;
+        }
+
+        updateStat('scanned', withVin.length);
+        showProgress(8, 'Decoding ' + withVin.length + ' VIN(s) via NHTSA vPIC…');
+
+        var vinList = withVin.map(function (d) { return d.vehicleIdentificationNumber.replace(/\s/g,''); });
+
+        batchDecodeVINs(vinList, function (vinMap) {
+          // Build unique make+model+year combos
+          var comboMap = {};
+          withVin.forEach(function (d) {
+            var vin  = d.vehicleIdentificationNumber.replace(/\s/g,'').toUpperCase();
+            var info = vinMap[vin];
+            if (info && info.make && info.model && info.modelYear) {
+              var key = info.make + '|' + info.model + '|' + info.modelYear;
+              if (!comboMap[key]) {
+                comboMap[key] = { make: info.make, model: info.model, modelYear: info.modelYear, vehicles: [] };
+              }
+              comboMap[key].vehicles.push(d);
+            }
+          });
+
+          var comboList = Object.keys(comboMap).map(function (k) { return comboMap[k]; });
+
+          if (comboList.length === 0) {
+            showStatus('warning', 'VINs were found but could not be decoded. Verify VIN formatting.');
+            lockScanBtn(false);
+            scanning = false;
+            hideProgress();
+            return;
+          }
+
+          showProgress(20, 'Querying NHTSA for ' + comboList.length + ' vehicle type(s)…');
+
+          var recallCache = {};
+
+          function queryNext(idx) {
+            if (idx >= comboList.length) {
+              mergeAndRender(withVin, vinMap, comboMap, recallCache, missingVinCount);
+              return;
+            }
+            var combo = comboList[idx];
+            var key   = combo.make + '|' + combo.model + '|' + combo.modelYear;
+            var pct   = 20 + Math.round((idx / comboList.length) * 76);
+            showProgress(pct, 'Checking recalls: ' + combo.make + ' ' + combo.model + ' ' + combo.modelYear + ' (' + (idx + 1) + ' / ' + comboList.length + ')');
+
+            fetchRecalls(combo.make, combo.model, combo.modelYear, function (recalls) {
+              recallCache[key] = recalls || [];
+              queryNext(idx + 1);
+            });
+          }
+
+          queryNext(0);
+        });
+      },
+      function (err) {
+        showStatus('error', 'Failed to load fleet data: ' + escHtml(err.message || String(err)));
+        lockScanBtn(false);
+        scanning = false;
+        hideProgress();
+      }
+    );
+  }
+
+  // ── vPIC Batch VIN Decode ──────────────────────────────────────────────────
+  function batchDecodeVINs(vinList, callback) {
+    var map    = {};
+    var unique = [];
+    var seen   = {};
+    vinList.forEach(function (v) {
+      var u = v.toUpperCase();
+      if (!seen[u]) { seen[u] = true; unique.push(u); }
+    });
+
+    var chunks = [];
+    for (var i = 0; i < unique.length; i += 50) {
+      chunks.push(unique.slice(i, i + 50));
+    }
+
+    function processChunk(idx) {
+      if (idx >= chunks.length) { callback(map); return; }
+
+      var chunk = chunks[idx];
+      var body  = 'DATA=' + encodeURIComponent(chunk.join(';')) + '&format=json';
+
+      fetch('https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVINValuesBatch/', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body:    body
+      })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        (data.Results || []).forEach(function (item) {
+          var errCode = String(item.ErrorCode || '');
+          var vin     = (item.VIN || '').toUpperCase();
+          if (errCode === '0' || errCode.split(',')[0] === '0') {
+            if (item.Make && item.Model && item.ModelYear) {
+              map[vin] = {
+                make:      item.Make.toUpperCase(),
+                model:     item.Model.toUpperCase(),
+                modelYear: item.ModelYear
+              };
+            }
+          }
+        });
+        processChunk(idx + 1);
+      })
+      .catch(function () {
+        // Skip failed chunk, continue
+        processChunk(idx + 1);
+      });
+    }
+
+    processChunk(0);
+  }
+
+  // ── Single VIN Decode (for manual search) ─────────────────────────────────
+  function decodeVIN(vin, callback) {
+    var url = 'https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVinValues/' + encodeURIComponent(vin) + '?format=json';
+    fetch(url)
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        var r = (data.Results || [])[0];
+        if (r && r.Make && r.Model && r.ModelYear) {
+          callback(null, { make: r.Make.toUpperCase(), model: r.Model.toUpperCase(), modelYear: r.ModelYear });
+        } else {
+          callback('Could not decode VIN. Please check the VIN and try again.');
+        }
+      })
+      .catch(function (e) { callback('VIN decode failed: ' + e.message); });
+  }
+
+  // ── NHTSA Recall Query ─────────────────────────────────────────────────────
+  function fetchRecalls(make, model, modelYear, callback) {
+    var url = 'https://api.nhtsa.gov/recalls/recallsByVehicle' +
+              '?make='      + encodeURIComponent(make) +
+              '&model='     + encodeURIComponent(model) +
+              '&modelYear=' + encodeURIComponent(modelYear);
+    fetch(url)
+      .then(function (r) { return r.json(); })
+      .then(function (data) { callback(data.results || []); })
+      .catch(function ()   { callback([]); });
+  }
+
+  // ── Merge & Render ─────────────────────────────────────────────────────────
+  function mergeAndRender(withVin, vinMap, comboMap, recallCache, missingVinCount) {
+    fleetData = [];
+
+    withVin.forEach(function (d) {
+      var vin  = d.vehicleIdentificationNumber.replace(/\s/g,'').toUpperCase();
+      var info = vinMap[vin] || null;
+      if (!info) {
+        fleetData.push({ name: d.name, vin: d.vehicleIdentificationNumber, make: '—', model: '—', modelYear: '—', recalls: [], hasParkIt: false, hasParkOutside: false, decoded: false });
+        return;
+      }
+      var key     = info.make + '|' + info.model + '|' + info.modelYear;
+      var recalls = recallCache[key] || [];
+      fleetData.push({
+        name:         d.name,
+        vin:          d.vehicleIdentificationNumber,
+        make:         info.make,
+        model:        info.model,
+        modelYear:    info.modelYear,
+        recalls:      recalls,
+        hasParkIt:    recalls.some(function (r) { return r.parkIt; }),
+        hasParkOutside: recalls.some(function (r) { return r.parkOutSide; }),
+        decoded:      true
+      });
+    });
+
+    // Sort by recall count desc
+    fleetData.sort(function (a, b) { return b.recalls.length - a.recalls.length; });
+
+    // Compute stats
+    var affected = fleetData.filter(function (v) { return v.recalls.length > 0; }).length;
+    var allIds   = {};
+    fleetData.forEach(function (v) { v.recalls.forEach(function (r) { allIds[r.NHTSACampaignNumber] = true; }); });
+    var parkItCount = fleetData.filter(function (v) { return v.hasParkIt; }).length;
+
+    updateStat('affected', affected);
+    updateStat('recalls',  Object.keys(allIds).length);
+    updateStat('parkit',   parkItCount);
+
+    showProgress(100, 'Scan complete.');
+
+    setTimeout(function () {
+      hideProgress();
+      renderFleetTab();
+      renderRecallsTab();
+      el('nhtsa-export-btn').disabled = false;
+      scanning = false;
+      lockScanBtn(false);
+
+      if (missingVinCount > 0) {
+        showStatus('info', missingVinCount + ' vehicle(s) had no VIN and were skipped. Add VINs under Administration > Vehicles to include them.');
+      } else {
+        hideStatus();
+      }
+    }, 400);
+  }
+
+  // ── Severity badge ─────────────────────────────────────────────────────────
+  function severityBadge(vehicle) {
+    if (vehicle.recalls.length === 0) {
+      return '<span style="display:inline-flex;align-items:center;padding:3px 8px;border-radius:12px;font-size:11px;font-weight:600;background:#E8F5ED;color:#1B5E30;">Clear</span>';
+    }
+    if (vehicle.hasParkIt) {
+      return '<span style="display:inline-flex;align-items:center;padding:3px 8px;border-radius:12px;font-size:11px;font-weight:600;background:#FDE8E8;color:#C51A11;">&#9888; Park-It!</span>';
+    }
+    if (vehicle.hasParkOutside) {
+      return '<span style="display:inline-flex;align-items:center;padding:3px 8px;border-radius:12px;font-size:11px;font-weight:600;background:#FEF3C7;color:#92400E;">&#9888; Park Outside</span>';
+    }
+    return '<span style="display:inline-flex;align-items:center;padding:3px 8px;border-radius:12px;font-size:11px;font-weight:600;background:#FFF8E1;color:#7A5A00;">Open Recall(s)</span>';
+  }
+
+  // ── Render: Fleet Overview Tab ─────────────────────────────────────────────
+  function renderFleetTab() {
+    var wrap = el('nhtsa-fleet-table-wrap');
+    if (!fleetData.length) {
+      wrap.innerHTML = '<p class="nhtsa-empty">No vehicle data.</p>';
+      return;
+    }
+
+    var html = '<table class="nhtsa-table" style="width:100%">' +
+      '<thead><tr>' +
+      '<th>Vehicle Name</th>' +
+      '<th>VIN</th>' +
+      '<th>Make</th>' +
+      '<th>Model</th>' +
+      '<th>Year</th>' +
+      '<th style="text-align:center">Recalls</th>' +
+      '<th>Severity</th>' +
+      '</tr></thead><tbody>';
+
+    fleetData.forEach(function (v, i) {
+      var bg  = (i % 2 === 0) ? '' : 'background:#F9FAFB;';
+      var cnt = v.recalls.length;
+      html += '<tr style="' + bg + '">' +
+        '<td style="font-weight:600;color:#1F2833">' + escHtml(v.name) + '</td>' +
+        '<td style="font-family:monospace;font-size:12px;color:#4E677E">' + escHtml(v.vin) + '</td>' +
+        '<td>' + escHtml(v.make) + '</td>' +
+        '<td>' + escHtml(v.model) + '</td>' +
+        '<td>' + escHtml(v.modelYear) + '</td>' +
+        '<td style="text-align:center;font-weight:700;color:' + (cnt > 0 ? '#C51A11' : '#1B5E30') + '">' + cnt + '</td>' +
+        '<td>' + severityBadge(v) + '</td>' +
+        '</tr>';
+    });
+
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+  }
+
+  // ── Render: Recall Details Tab ─────────────────────────────────────────────
+  function renderRecallsTab() {
+    var wrap = el('nhtsa-recalls-table-wrap');
+
+    // Build unique recall campaigns with list of affected vehicles
+    var campaignMap = {};
+    fleetData.forEach(function (v) {
+      v.recalls.forEach(function (r) {
+        var key = r.NHTSACampaignNumber;
+        if (!campaignMap[key]) {
+          campaignMap[key] = {
+            campaign:    r.NHTSACampaignNumber,
+            component:   r.Component,
+            date:        r.ReportReceivedDate,
+            summary:     r.Summary,
+            consequence: r.Consequence,
+            remedy:      r.Remedy,
+            notes:       r.Notes,
+            parkIt:      r.parkIt,
+            parkOutside: r.parkOutSide,
+            vehicles:    []
+          };
+        }
+        campaignMap[key].vehicles.push(v.name + ' (' + v.vin + ')');
+      });
+    });
+
+    var campaigns = Object.keys(campaignMap).map(function (k) { return campaignMap[k]; });
+
+    if (campaigns.length === 0) {
+      wrap.innerHTML = '<p class="nhtsa-empty" style="color:#1B5E30;">&#10003; No open recalls found across your fleet.</p>';
+      return;
+    }
+
+    // Sort by severity then date
+    campaigns.sort(function (a, b) {
+      if (a.parkIt && !b.parkIt) return -1;
+      if (!a.parkIt && b.parkIt) return 1;
+      if (a.parkOutside && !b.parkOutside) return -1;
+      if (!a.parkOutside && b.parkOutside) return 1;
+      return b.vehicles.length - a.vehicles.length;
+    });
+
+    var html = '<table class="nhtsa-table" style="width:100%">' +
+      '<thead><tr>' +
+      '<th style="width:32px"></th>' +
+      '<th>Campaign #</th>' +
+      '<th>Date</th>' +
+      '<th>Component</th>' +
+      '<th style="text-align:center">Vehicles</th>' +
+      '<th>Severity</th>' +
+      '<th>Summary</th>' +
+      '</tr></thead><tbody>';
+
+    campaigns.forEach(function (c, i) {
+      var rowId  = 'nhtsa-recall-row-' + i;
+      var detId  = 'nhtsa-recall-det-' + i;
+      var bg     = (i % 2 === 0) ? '' : 'background:#F9FAFB;';
+      var sev    = c.parkIt ? '<span style="display:inline-flex;padding:3px 8px;border-radius:12px;font-size:11px;font-weight:600;background:#FDE8E8;color:#C51A11;">&#9888; Park-It!</span>'
+                 : c.parkOutside ? '<span style="display:inline-flex;padding:3px 8px;border-radius:12px;font-size:11px;font-weight:600;background:#FEF3C7;color:#92400E;">&#9888; Park Outside</span>'
+                 : '<span style="display:inline-flex;padding:3px 8px;border-radius:12px;font-size:11px;font-weight:600;background:#FFF8E1;color:#7A5A00;">Standard</span>';
+
+      html += '<tr id="' + rowId + '" style="' + bg + 'cursor:pointer;" onclick="document.getElementById(\'' + detId + '\').style.display = document.getElementById(\'' + detId + '\').style.display === \'none\' ? \'table-row\' : \'none\'">' +
+        '<td style="text-align:center;color:#4E677E;font-size:14px;">&#9660;</td>' +
+        '<td style="font-family:monospace;font-size:12px;font-weight:700;color:#25477B">' + escHtml(c.campaign) + '</td>' +
+        '<td style="color:#4E677E;font-size:12px;white-space:nowrap">' + escHtml(c.date) + '</td>' +
+        '<td style="font-size:12px">' + escHtml(c.component) + '</td>' +
+        '<td style="text-align:center;font-weight:700;color:#0069BF">' + c.vehicles.length + '</td>' +
+        '<td>' + sev + '</td>' +
+        '<td style="font-size:12px;color:#4E677E;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escHtml(c.summary) + '">' + escHtml(c.summary.substring(0,100)) + (c.summary.length > 100 ? '…' : '') + '</td>' +
+        '</tr>';
+
+      html += '<tr id="' + detId + '" style="display:none;background:#F2F5F7;">' +
+        '<td colspan="7" style="padding:16px 20px;">' +
+        '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">' +
+        '<div><div style="font-size:11px;font-weight:700;color:#4E677E;text-transform:uppercase;margin-bottom:4px;">Full Summary</div><div style="font-size:13px;color:#1F2833;">' + escHtml(c.summary) + '</div></div>' +
+        '<div><div style="font-size:11px;font-weight:700;color:#4E677E;text-transform:uppercase;margin-bottom:4px;">Consequence</div><div style="font-size:13px;color:#1F2833;">' + escHtml(c.consequence || '—') + '</div></div>' +
+        '<div><div style="font-size:11px;font-weight:700;color:#4E677E;text-transform:uppercase;margin-bottom:4px;">Remedy</div><div style="font-size:13px;color:#1B5E30;font-weight:600;">' + escHtml(c.remedy || '—') + '</div></div>' +
+        (c.notes ? '<div><div style="font-size:11px;font-weight:700;color:#4E677E;text-transform:uppercase;margin-bottom:4px;">Notes</div><div style="font-size:12px;color:#4E677E;">' + escHtml(c.notes) + '</div></div>' : '') +
+        '</div>' +
+        '<div style="margin-top:8px;padding-top:8px;border-top:1px solid #D9E1E8;">' +
+        '<div style="font-size:11px;font-weight:700;color:#4E677E;text-transform:uppercase;margin-bottom:6px;">Affected Vehicles (' + c.vehicles.length + ')</div>' +
+        '<div style="font-size:12px;color:#1F2833;line-height:1.8;">' + c.vehicles.map(function (vn) { return escHtml(vn); }).join('<br>') + '</div>' +
+        '</div>' +
+        '</td></tr>';
+    });
+
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+  }
+
+  // ── Manual Search: by VIN ──────────────────────────────────────────────────
+  function searchByVIN() {
+    var vin = (el('nhtsa-vin-input').value || '').replace(/\s/g,'').toUpperCase();
+    if (!vin || vin.length < 6) {
+      renderSearchResults([], 'Enter a valid VIN (minimum 6 characters).', 'error');
+      return;
+    }
+
+    renderSearchResults([], 'Decoding VIN…', 'loading');
+    decodeVIN(vin, function (err, info) {
+      if (err) { renderSearchResults([], err, 'error'); return; }
+      renderSearchResults([], 'Searching recalls for ' + info.make + ' ' + info.model + ' ' + info.modelYear + '…', 'loading');
+      fetchRecalls(info.make, info.model, info.modelYear, function (recalls) {
+        renderSearchResults(recalls, info.make + ' ' + info.model + ' ' + info.modelYear + ' — ' + recalls.length + ' recall(s) found', 'info');
+      });
+    });
+  }
+
+  // ── Manual Search: by Make/Model/Year ─────────────────────────────────────
+  function searchByMMY() {
+    var make  = (el('nhtsa-make-input').value  || '').trim().toUpperCase();
+    var model = (el('nhtsa-model-input').value || '').trim().toUpperCase();
+    var year  = (el('nhtsa-year-input').value  || '').trim();
+    if (!make || !model || !year) {
+      renderSearchResults([], 'Please fill in Make, Model, and Year.', 'error');
+      return;
+    }
+    renderSearchResults([], 'Searching recalls for ' + make + ' ' + model + ' ' + year + '…', 'loading');
+    fetchRecalls(make, model, year, function (recalls) {
+      renderSearchResults(recalls, make + ' ' + model + ' ' + year + ' — ' + recalls.length + ' recall(s) found', 'info');
+    });
+  }
+
+  function renderSearchResults(recalls, msg, type) {
+    var wrap = el('nhtsa-search-result-wrap');
+
+    if (type === 'loading') {
+      wrap.innerHTML = '<p class="nhtsa-empty"><span class="nhtsa-spinner-inline"></span> ' + escHtml(msg) + '</p>';
+      return;
+    }
+    if (type === 'error') {
+      wrap.innerHTML = '<p class="nhtsa-empty" style="color:#C51A11;">' + escHtml(msg) + '</p>';
+      return;
+    }
+
+    if (recalls.length === 0) {
+      wrap.innerHTML = '<p class="nhtsa-empty" style="color:#1B5E30;">&#10003; ' + escHtml(msg) + '</p>';
+      return;
+    }
+
+    var html = '<div style="margin-bottom:12px;font-size:13px;color:#4E677E;font-weight:600;">' + escHtml(msg) + '</div>';
+    html += '<table class="nhtsa-table" style="width:100%">' +
+      '<thead><tr>' +
+      '<th style="width:32px"></th>' +
+      '<th>Campaign #</th>' +
+      '<th>Date</th>' +
+      '<th>Component</th>' +
+      '<th>Severity</th>' +
+      '<th>Summary</th>' +
+      '</tr></thead><tbody>';
+
+    recalls.forEach(function (r, i) {
+      var rowId = 'nhtsa-sr-' + i;
+      var detId = 'nhtsa-sd-' + i;
+      var bg    = (i % 2 === 0) ? '' : 'background:#F9FAFB;';
+      var sev   = r.parkIt ? '<span style="display:inline-flex;padding:3px 8px;border-radius:12px;font-size:11px;font-weight:600;background:#FDE8E8;color:#C51A11;">&#9888; Park-It!</span>'
+                : r.parkOutSide ? '<span style="display:inline-flex;padding:3px 8px;border-radius:12px;font-size:11px;font-weight:600;background:#FEF3C7;color:#92400E;">&#9888; Park Outside</span>'
+                : '<span style="display:inline-flex;padding:3px 8px;border-radius:12px;font-size:11px;font-weight:600;background:#FFF8E1;color:#7A5A00;">Standard</span>';
+
+      html += '<tr style="' + bg + 'cursor:pointer;" onclick="document.getElementById(\'' + detId + '\').style.display = document.getElementById(\'' + detId + '\').style.display === \'none\' ? \'table-row\' : \'none\'">' +
+        '<td style="text-align:center;color:#4E677E">&#9660;</td>' +
+        '<td style="font-family:monospace;font-size:12px;font-weight:700;color:#25477B">' + escHtml(r.NHTSACampaignNumber) + '</td>' +
+        '<td style="color:#4E677E;font-size:12px;white-space:nowrap">' + escHtml(r.ReportReceivedDate) + '</td>' +
+        '<td style="font-size:12px">' + escHtml(r.Component) + '</td>' +
+        '<td>' + sev + '</td>' +
+        '<td style="font-size:12px;color:#4E677E">' + escHtml(r.Summary ? r.Summary.substring(0,100) + (r.Summary.length > 100 ? '…' : '') : '') + '</td>' +
+        '</tr>';
+
+      html += '<tr id="' + detId + '" style="display:none;background:#F2F5F7;"><td colspan="6" style="padding:16px 20px;">' +
+        '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">' +
+        '<div><div style="font-size:11px;font-weight:700;color:#4E677E;text-transform:uppercase;margin-bottom:4px;">Full Summary</div><div style="font-size:13px;color:#1F2833;">' + escHtml(r.Summary || '—') + '</div></div>' +
+        '<div><div style="font-size:11px;font-weight:700;color:#4E677E;text-transform:uppercase;margin-bottom:4px;">Consequence</div><div style="font-size:13px;color:#1F2833;">' + escHtml(r.Consequence || '—') + '</div></div>' +
+        '<div><div style="font-size:11px;font-weight:700;color:#4E677E;text-transform:uppercase;margin-bottom:4px;">Remedy</div><div style="font-size:13px;color:#1B5E30;font-weight:600;">' + escHtml(r.Remedy || '—') + '</div></div>' +
+        (r.Notes ? '<div><div style="font-size:11px;font-weight:700;color:#4E677E;text-transform:uppercase;margin-bottom:4px;">Notes</div><div style="font-size:12px;color:#4E677E;">' + escHtml(r.Notes) + '</div></div>' : '') +
+        '</div></td></tr>';
+    });
+
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+  }
+
+  // ── Export CSV ─────────────────────────────────────────────────────────────
+  function exportCSV() {
+    if (!fleetData.length) return;
+
+    var rows = [['Vehicle Name','VIN','Make','Model','Year','Campaign #','Component','Date Received','Park-It','Park Outside','Summary','Consequence','Remedy']];
+
+    fleetData.forEach(function (v) {
+      if (v.recalls.length === 0) {
+        rows.push([v.name, v.vin, v.make, v.model, v.modelYear, 'No recalls', '', '', '', '', '', '', '']);
+      } else {
+        v.recalls.forEach(function (r) {
+          rows.push([
+            v.name,
+            v.vin,
+            v.make,
+            v.model,
+            v.modelYear,
+            r.NHTSACampaignNumber,
+            r.Component,
+            r.ReportReceivedDate,
+            r.parkIt ? 'YES' : 'NO',
+            r.parkOutSide ? 'YES' : 'NO',
+            r.Summary,
+            r.Consequence,
+            r.Remedy
+          ]);
+        });
+      }
+    });
+
+    var csv = rows.map(function (row) {
+      return row.map(function (cell) {
+        var s = String(cell || '').replace(/"/g, '""');
+        return /[,"\n]/.test(s) ? '"' + s + '"' : s;
+      }).join(',');
+    }).join('\r\n');
+
+    var blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+    var url  = URL.createObjectURL(blob);
+    var a    = document.createElement('a');
+    a.href     = url;
+    a.download = 'NHTSA_Recalls_' + new Date().toISOString().slice(0,10) + '.csv';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  // ── injectStyles ───────────────────────────────────────────────────────────
+  function injectStyles() {
+    if (document.getElementById('nhtsa-recall-styles')) return;
+
+    var link  = document.createElement('link');
+    link.rel  = 'stylesheet';
+    link.href = 'https://fonts.googleapis.com/css2?family=Nunito+Sans:wght@400;600;700&display=swap';
+    document.head.appendChild(link);
+
+    var s = document.createElement('style');
+    s.id  = 'nhtsa-recall-styles';
+    s.textContent = [
+      '#nhtsa-app { font-family:"Nunito Sans",sans-serif; color:#1F2833; max-width:1200px; }',
+
+      /* Header */
+      '.nhtsa-page-header { display:flex!important; justify-content:space-between; align-items:center; background:#25477B; color:#fff; border-radius:8px; padding:16px 24px; margin-bottom:20px; }',
+      '.nhtsa-header-left h1 { margin:0; font-size:20px; font-weight:700; color:#fff; }',
+      '.nhtsa-header-left p  { margin:4px 0 0; font-size:13px; color:rgba(255,255,255,0.8); }',
+      '.nhtsa-header-right   { display:flex!important; gap:10px; align-items:center; }',
+
+      /* Stat cards */
+      '.nhtsa-stat-cards { display:flex!important; gap:12px; margin-bottom:20px; }',
+      '.nhtsa-stat-card  { flex:1; background:#fff; border:1px solid #D9E1E8; border-radius:8px; padding:14px 18px; box-shadow:0 1px 3px rgba(0,0,0,0.06); }',
+      '.nhtsa-stat-card-alert { border-color:#F5A0A0; background:#FFF8F8; }',
+      '.nhtsa-stat-label { font-size:11px; font-weight:700; color:#4E677E; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px; }',
+      '.nhtsa-stat-value { font-size:28px; font-weight:700; color:#1F2833; line-height:1; }',
+      '.nhtsa-stat-card-alert .nhtsa-stat-value { color:#C51A11; }',
+
+      /* Progress */
+      '#nhtsa-progress-wrap { margin-bottom:16px; }',
+      '.nhtsa-progress-bg   { background:#D9E1E8; border-radius:8px; height:8px; overflow:hidden; margin-bottom:6px; }',
+      '.nhtsa-progress-bar  { background:#0069BF; height:8px; border-radius:8px; transition:width 0.3s ease; }',
+      '.nhtsa-progress-label { font-size:12px; color:#4E677E; }',
+
+      /* Status bar */
+      '.nhtsa-status         { display:flex!important; align-items:flex-start; gap:8px; padding:10px 14px; border-radius:6px; font-size:13px; margin-bottom:16px; }',
+      '.nhtsa-status-info    { background:#E6F0FA; color:#25477B; border:1px solid #B3CFEE; }',
+      '.nhtsa-status-warning { background:#FEF3C7; color:#92400E; border:1px solid #FCD34D; }',
+      '.nhtsa-status-error   { background:#FDE8E8; color:#C51A11; border:1px solid #F5A0A0; }',
+
+      /* Buttons */
+      '.nhtsa-btn          { padding:9px 16px; border-radius:6px; font-size:13px; font-weight:600; font-family:"Nunito Sans",sans-serif; cursor:pointer; border:none; transition:opacity 0.15s; }',
+      '.nhtsa-btn:disabled { opacity:0.5; cursor:default; }',
+      '.nhtsa-btn-primary  { background:#25477B; color:#fff; }',
+      '.nhtsa-btn-primary:hover:not(:disabled) { background:#1d3861; }',
+      '.nhtsa-btn-success  { background:#2D7D46; color:#fff; }',
+      '.nhtsa-btn-success:hover:not(:disabled) { background:#246038; }',
+
+      /* Tabs */
+      '.nhtsa-tabs         { display:flex!important; gap:0; margin-bottom:0; }',
+      '.nhtsa-tab          { padding:10px 20px; border-radius:8px 8px 0 0; border:1.5px solid #D9E1E8; border-bottom:none; background:#F2F5F7; color:#4E677E; font-size:13px; font-weight:600; font-family:"Nunito Sans",sans-serif; cursor:pointer; }',
+      '.nhtsa-tab.active   { background:#fff; color:#25477B; border-color:#D9E1E8; }',
+
+      /* Panels */
+      '.nhtsa-panel { }',
+
+      /* Table wrap */
+      '.nhtsa-table-wrap  { border:1.5px solid #D9E1E8; border-radius:0 8px 8px 8px; overflow:auto; background:#fff; }',
+      '.nhtsa-empty       { padding:32px; text-align:center; color:#8DA4B9; margin:0; font-size:14px; }',
+
+      /* Table */
+      '.nhtsa-table              { border-collapse:collapse; font-size:13px; }',
+      '.nhtsa-table thead tr     { background:#25477B; }',
+      '.nhtsa-table thead th     { color:#fff; font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.4px; padding:11px 14px; text-align:left; white-space:nowrap; border:none; }',
+      '.nhtsa-table tbody td     { padding:10px 14px; border-bottom:1px solid #F2F5F7; vertical-align:middle; color:#1F2833; }',
+      '.nhtsa-table tbody tr:last-child td { border-bottom:none; }',
+      '.nhtsa-table tbody tr:hover td { background:#E6F0FA!important; }',
+
+      /* Card (search panel) */
+      '.nhtsa-card        { background:#fff; border:1.5px solid #D9E1E8; border-radius:8px; padding:20px; margin-bottom:0; }',
+      '.nhtsa-search-block { margin-bottom:12px; }',
+      '.nhtsa-search-block-title { font-size:12px; font-weight:700; color:#4E677E; text-transform:uppercase; margin-bottom:8px; }',
+      '.nhtsa-search-row  { display:flex!important; gap:8px; align-items:center; flex-wrap:wrap; }',
+      '.nhtsa-search-divider { text-align:center; color:#8DA4B9; font-size:12px; padding:12px 0; border-top:1px solid #D9E1E8; border-bottom:1px solid #D9E1E8; margin:4px 0 16px; }',
+
+      /* Inputs */
+      '.nhtsa-input      { padding:8px 12px; border:1.5px solid #D9E1E8; border-radius:6px; font-size:13px; font-family:"Nunito Sans",sans-serif; color:#1F2833; background:#fff; flex:1; min-width:120px; }',
+      '.nhtsa-input:focus { outline:none; border-color:#0069BF; }',
+      '.nhtsa-input-year  { flex:0 0 90px; min-width:90px; }',
+
+      /* Spinner */
+      '.nhtsa-spinner-inline { display:inline-block; width:12px; height:12px; border:2px solid #D9E1E8; border-top-color:#0069BF; border-radius:50%; animation:nhtsa-spin 0.7s linear infinite; vertical-align:middle; margin-right:4px; }',
+      '@keyframes nhtsa-spin { to { transform:rotate(360deg); } }'
+    ].join('\n');
+
+    document.head.appendChild(s);
+  }
+
+}();
+</script>
+
+</body>
+</html>
