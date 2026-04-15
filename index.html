@@ -320,13 +320,12 @@ window.geotab.addin.nhtsaRecalls = function () {
 
     api.call(
       'Get',
-      { typeName: 'Device', resultsLimit: 5000 },
+      { typeName: 'Device', search: { fromDate: new Date().toISOString() }, resultsLimit: 5000 },
       function (devices) {
-        var activeDevices = (devices || []).filter(function (d) { return !d.isArchived; });
-        var withVin = activeDevices.filter(function (d) {
+        var withVin = (devices || []).filter(function (d) {
           return d.vehicleIdentificationNumber && d.vehicleIdentificationNumber.replace(/\s/g, '').length >= 6;
         });
-        var missingVinCount = activeDevices.length - withVin.length;
+        var missingVinCount = (devices || []).length - withVin.length;
 
         updateStat('scanned', withVin.length);
 
