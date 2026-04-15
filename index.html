@@ -271,10 +271,11 @@ window.geotab.addin.nhtsaRecalls = function () {
       'Get',
       { typeName: 'Device', resultsLimit: 5000 },
       function (devices) {
-        var withVin = (devices || []).filter(function (d) {
+        var activeDevices = (devices || []).filter(function (d) { return !d.isArchived; });
+        var withVin = activeDevices.filter(function (d) {
           return d.vehicleIdentificationNumber && d.vehicleIdentificationNumber.replace(/\s/g, '').length >= 6;
         });
-        var missingVinCount = (devices || []).length - withVin.length;
+        var missingVinCount = activeDevices.length - withVin.length;
 
         updateStat('scanned', withVin.length);
 
