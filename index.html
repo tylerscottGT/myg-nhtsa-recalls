@@ -18,9 +18,13 @@
       <h1 style="margin:0;font-size:20px;font-weight:700;color:#fff;font-family:'Nunito Sans',sans-serif;">Vehicle Recall Dashboard</h1>
       <p style="margin:4px 0 0;font-size:13px;color:rgba(255,255,255,0.85);font-family:'Nunito Sans',sans-serif;">NHTSA + Transport Canada recall monitoring &mdash; fleet-wide</p>
     </div>
-    <div style="display:flex;gap:10px;align-items:center;">
-      <button id="nhtsa-scan-btn" style="padding:9px 18px;background:#fff;color:#25477B;border:none;border-radius:6px;font-size:13px;font-weight:700;cursor:pointer;font-family:'Nunito Sans',sans-serif;">&#9654; Scan Fleet</button>
-      <button id="nhtsa-export-btn" style="padding:9px 18px;background:#2D7D46;color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:700;cursor:pointer;font-family:'Nunito Sans',sans-serif;opacity:0.5;" disabled>&#11015; Export CSV</button>
+    <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px;">
+      <div style="display:flex;gap:10px;align-items:center;">
+        <button id="nhtsa-scan-btn" style="padding:9px 18px;background:#fff;color:#25477B;border:none;border-radius:6px;font-size:13px;font-weight:700;cursor:pointer;font-family:'Nunito Sans',sans-serif;">&#9654; Scan Fleet</button>
+        <button id="nhtsa-print-btn" style="padding:9px 18px;background:rgba(255,255,255,0.15);color:#fff;border:1.5px solid rgba(255,255,255,0.4);border-radius:6px;font-size:13px;font-weight:700;cursor:pointer;font-family:'Nunito Sans',sans-serif;opacity:0.5;" disabled>&#128438; Print Report</button>
+        <button id="nhtsa-export-btn" style="padding:9px 18px;background:#2D7D46;color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:700;cursor:pointer;font-family:'Nunito Sans',sans-serif;opacity:0.5;" disabled>&#11015; Export CSV</button>
+      </div>
+      <div id="nhtsa-last-scan-display" style="font-size:11px;color:rgba(255,255,255,0.65);font-family:'Nunito Sans',sans-serif;">Never scanned</div>
     </div>
   </div>
 
@@ -105,6 +109,28 @@
 
 </div><!-- #nhtsa-app -->
 
+<!-- Dismiss Panel — body-level, position:fixed (MyGeotab standard for floating panels) -->
+<div id="nhtsa-dismiss-overlay" style="position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:9998;display:none;"></div>
+<div id="nhtsa-dismiss-panel" style="position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:9999;background:#fff;border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,0.22);width:400px;max-width:95vw;display:none;">
+  <div style="background:#25477B;color:#fff;padding:14px 20px;border-radius:10px 10px 0 0;font-weight:700;font-size:14px;font-family:'Nunito Sans',sans-serif;">&#10003; Mark Recall as Serviced</div>
+  <div style="padding:20px;">
+    <input type="hidden" id="nhtsa-dismiss-campaign">
+    <div style="margin-bottom:4px;padding:8px 12px;background:#F2F5F7;border-radius:6px;font-size:12px;font-family:monospace;color:#25477B;font-weight:700;" id="nhtsa-dismiss-campaign-display"></div>
+    <div style="margin-top:14px;margin-bottom:14px;">
+      <label style="display:block;font-size:12px;font-weight:700;color:#4E677E;text-transform:uppercase;margin-bottom:6px;font-family:'Nunito Sans',sans-serif;">Service Date</label>
+      <input type="date" id="nhtsa-dismiss-date" style="width:100%;padding:8px 12px;border:1.5px solid #D9E1E8;border-radius:6px;font-size:13px;font-family:'Nunito Sans',sans-serif;color:#1F2833;box-sizing:border-box;">
+    </div>
+    <div style="margin-bottom:18px;">
+      <label style="display:block;font-size:12px;font-weight:700;color:#4E677E;text-transform:uppercase;margin-bottom:6px;font-family:'Nunito Sans',sans-serif;">Service Notes <span style="text-transform:none;font-weight:400;">(optional)</span></label>
+      <textarea id="nhtsa-dismiss-notes" rows="3" placeholder="Dealer name, work order #, technician, etc." style="width:100%;padding:8px 12px;border:1.5px solid #D9E1E8;border-radius:6px;font-size:13px;font-family:'Nunito Sans',sans-serif;color:#1F2833;resize:vertical;box-sizing:border-box;"></textarea>
+    </div>
+    <div style="display:flex;gap:10px;justify-content:flex-end;">
+      <button id="nhtsa-dismiss-cancel" style="padding:8px 16px;background:#F2F5F7;color:#4E677E;border:1.5px solid #D9E1E8;border-radius:6px;font-size:13px;font-weight:700;cursor:pointer;font-family:'Nunito Sans',sans-serif;">Cancel</button>
+      <button id="nhtsa-dismiss-confirm" style="padding:8px 16px;background:#1B5E30;color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:700;cursor:pointer;font-family:'Nunito Sans',sans-serif;">&#10003; Save &amp; Dismiss</button>
+    </div>
+  </div>
+</div>
+
 <script>
 /* global geotab */
 'use strict';
@@ -115,10 +141,14 @@ window.geotab.addin = window.geotab.addin || {};
 window.geotab.addin.nhtsaRecalls = function () {
 
   var api, state;
-  var fleetData       = [];
-  var scanning        = false;
-  var dismissedRecalls = {};   // { campaignNumber: true } — persisted in localStorage
-  var LS_KEY          = 'nhtsa-recall-dismissed';
+  var fleetData        = [];
+  var missingVinDevices = [];  // Names of vehicles with no VIN (for display)
+  var scanning         = false;
+  var dismissedRecalls = {};   // { campaignNumber: { serviceDate, notes, dismissedAt } }
+  var prevCampaigns    = {};   // { campaignNumber: true } — from last scan, for NEW detection
+  var LS_KEY           = 'nhtsa-recall-dismissed';
+  var LS_SCAN          = 'nhtsa-last-scan';
+  var LS_PREV          = 'nhtsa-prev-campaigns';
 
   // TC recall search base URL — deeplinks to their search results
   var TC_SEARCH = 'https://wwwapps.tc.gc.ca/Saf-Sec-Sur/7/VRDB-BDRV/search-recherche/lst?lang=eng';
@@ -129,10 +159,17 @@ window.geotab.addin.nhtsaRecalls = function () {
       api = fa; state = fs;
       injectStyles();
       loadDismissed();
+      loadLastScan();
+      loadPrevCampaigns();
       initPanels();
       wireEvents();
-      // Expose dismiss/restore for onclick handlers in dynamically built HTML
-      window._nhtsa = { dismiss: dismissRecall, restore: restoreRecall };
+      // Expose functions for onclick handlers in dynamically built HTML
+      window._nhtsa = {
+        dismiss: showDismissPanel,
+        restore: restoreRecall,
+        closeDismissPanel: closeDismissPanel,
+        confirmDismiss: confirmDismiss
+      };
       cb();
     },
     focus: function (fa, fs) { api = fa; state = fs; },
@@ -219,6 +256,55 @@ window.geotab.addin.nhtsaRecalls = function () {
     b.style.opacity = enabled ? '1' : '0.5';
   }
 
+  function lockPrintBtn(enabled) {
+    var b = el('nhtsa-print-btn');
+    if (!b) return;
+    b.disabled = !enabled;
+    b.style.opacity = enabled ? '1' : '0.5';
+  }
+
+  // ── Last Scan Timestamp ────────────────────────────────────────────────────
+  function loadLastScan() {
+    updateLastScanDisplay(localStorage.getItem(LS_SCAN));
+  }
+
+  function saveLastScan() {
+    var ts = new Date().toISOString();
+    try { localStorage.setItem(LS_SCAN, ts); } catch (e) {}
+    updateLastScanDisplay(ts);
+  }
+
+  function updateLastScanDisplay(ts) {
+    var disp = el('nhtsa-last-scan-display');
+    if (!disp) return;
+    if (!ts) { disp.textContent = 'Never scanned'; return; }
+    var d = new Date(ts);
+    var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    disp.textContent = 'Last scanned: ' + months[d.getMonth()] + ' ' + d.getDate() + ', ' + d.getFullYear() +
+      ' at ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+
+  // ── Previous Campaigns (NEW detection) ────────────────────────────────────
+  function loadPrevCampaigns() {
+    try { prevCampaigns = JSON.parse(localStorage.getItem(LS_PREV) || '{}'); }
+    catch (e) { prevCampaigns = {}; }
+  }
+
+  function savePrevCampaigns() {
+    var current = {};
+    fleetData.forEach(function (v) {
+      v.recalls.forEach(function (r) { current[r.NHTSACampaignNumber] = true; });
+    });
+    try { localStorage.setItem(LS_PREV, JSON.stringify(current)); } catch (e) {}
+    prevCampaigns = current;
+  }
+
+  // Returns true only when we have prior scan data AND this campaign is brand-new
+  function isNew(campaignNumber) {
+    if (Object.keys(prevCampaigns).length === 0) return false;
+    return !prevCampaigns[campaignNumber];
+  }
+
   // ── Dismiss helpers (localStorage-backed) ─────────────────────────────────
   function loadDismissed() {
     try { dismissedRecalls = JSON.parse(localStorage.getItem(LS_KEY) || '{}'); }
@@ -230,11 +316,47 @@ window.geotab.addin.nhtsaRecalls = function () {
     catch (e) {}
   }
 
-  function isDismissed(campaignNumber) { return !!dismissedRecalls[campaignNumber]; }
+  function isDismissed(campaignNumber) {
+    var d = dismissedRecalls[campaignNumber];
+    return d === true || (typeof d === 'object' && d !== null);
+  }
 
-  function dismissRecall(campaignNumber) {
-    dismissedRecalls[campaignNumber] = true;
+  // Show the dismiss panel (replaces direct dismiss call)
+  function showDismissPanel(campaignNumber) {
+    var overlay  = el('nhtsa-dismiss-overlay');
+    var panel    = el('nhtsa-dismiss-panel');
+    var campInp  = el('nhtsa-dismiss-campaign');
+    var campDisp = el('nhtsa-dismiss-campaign-display');
+    var dateInp  = el('nhtsa-dismiss-date');
+    var notesInp = el('nhtsa-dismiss-notes');
+    if (campInp)  campInp.value   = campaignNumber;
+    if (campDisp) campDisp.textContent = 'Campaign: ' + campaignNumber;
+    if (dateInp)  dateInp.value   = new Date().toISOString().slice(0, 10);
+    if (notesInp) notesInp.value  = '';
+    if (overlay)  overlay.style.display = 'block';
+    if (panel)    panel.style.display   = 'block';
+  }
+
+  function closeDismissPanel() {
+    var overlay = el('nhtsa-dismiss-overlay');
+    var panel   = el('nhtsa-dismiss-panel');
+    if (overlay) overlay.style.display = 'none';
+    if (panel)   panel.style.display   = 'none';
+  }
+
+  function confirmDismiss() {
+    var campInp  = el('nhtsa-dismiss-campaign');
+    var dateInp  = el('nhtsa-dismiss-date');
+    var notesInp = el('nhtsa-dismiss-notes');
+    if (!campInp || !campInp.value) return;
+    var campaignNumber = campInp.value;
+    dismissedRecalls[campaignNumber] = {
+      serviceDate: (dateInp  && dateInp.value)  || '',
+      notes:       (notesInp && notesInp.value) || '',
+      dismissedAt: new Date().toISOString()
+    };
     saveDismissed();
+    closeDismissPanel();
     recomputeStats();
     renderFleetTab();
     renderRecallsTab();
@@ -265,12 +387,42 @@ window.geotab.addin.nhtsaRecalls = function () {
     updateStat('parkit',   parkItCount);
   }
 
+  // ── Recall Age helpers ─────────────────────────────────────────────────────
+  // Parse MM/DD/YYYY date string → days elapsed
+  function daysOpen(dateStr) {
+    if (!dateStr) return -1;
+    var parts = dateStr.split('/');
+    if (parts.length !== 3) return -1;
+    var d = new Date(parseInt(parts[2], 10), parseInt(parts[0], 10) - 1, parseInt(parts[1], 10));
+    if (isNaN(d.getTime())) return -1;
+    return Math.floor((Date.now() - d.getTime()) / 86400000);
+  }
+
+  // Returns a <td> with color-coded days open
+  function daysOpenTd(dateStr) {
+    var days = daysOpen(dateStr);
+    if (days < 0) return '<td style="' + tdStyle() + 'color:#8DA4B9;">&#8212;</td>';
+    var color  = days > 365 ? '#C51A11' : (days >= 90 ? '#B45309' : '#4E677E');
+    var weight = days >= 90 ? '700' : '400';
+    return '<td style="' + tdStyle() + 'color:' + color + ';font-weight:' + weight + ';white-space:nowrap;">' + days + 'd</td>';
+  }
+
   // ── Event wiring ───────────────────────────────────────────────────────────
   function wireEvents() {
     var scanBtn   = el('nhtsa-scan-btn');
     var exportBtn = el('nhtsa-export-btn');
-    if (scanBtn)   scanBtn.addEventListener('click', function () { if (!scanning) scanFleet(); });
+    var printBtn  = el('nhtsa-print-btn');
+    if (scanBtn)   scanBtn.addEventListener('click',   function () { if (!scanning) scanFleet(); });
     if (exportBtn) exportBtn.addEventListener('click', exportCSV);
+    if (printBtn)  printBtn.addEventListener('click',  printReport);
+
+    // Dismiss panel buttons
+    var cancelBtn  = el('nhtsa-dismiss-cancel');
+    var confirmBtn = el('nhtsa-dismiss-confirm');
+    var overlay    = el('nhtsa-dismiss-overlay');
+    if (cancelBtn)  cancelBtn.addEventListener('click',  closeDismissPanel);
+    if (confirmBtn) confirmBtn.addEventListener('click', confirmDismiss);
+    if (overlay)    overlay.addEventListener('click',    closeDismissPanel);
 
     var tabs = document.querySelectorAll('#nhtsa-app .nhtsa-tab');
     tabs.forEach(function (tab) {
@@ -291,7 +443,6 @@ window.geotab.addin.nhtsaRecalls = function () {
   }
 
   // ── VIN country detection ─────────────────────────────────────────────────
-  // Returns 'CA' for Canadian-manufactured VINs (prefix 2), 'US' for US (1/4/5), else 'OTHER'
   function vinCountry(vin) {
     if (!vin || vin.length < 1) return 'OTHER';
     var c = vin.charAt(0).toUpperCase();
@@ -300,7 +451,7 @@ window.geotab.addin.nhtsaRecalls = function () {
     return 'OTHER';
   }
 
-  // Build Transport Canada deep-link for a vehicle
+  // Build Transport Canada deep-link
   function tcLink(make, model, year) {
     return TC_SEARCH + '&mk=' + encodeURIComponent(make) + '&md=' + encodeURIComponent(model) + '&yr=' + encodeURIComponent(year);
   }
@@ -310,8 +461,10 @@ window.geotab.addin.nhtsaRecalls = function () {
     scanning = true;
     lockScanBtn(true);
     lockExportBtn(false);
+    lockPrintBtn(false);
     hideStatus();
     fleetData = [];
+    missingVinDevices = [];
     updateStat('scanned',  '\u2026');
     updateStat('affected', '\u2026');
     updateStat('recalls',  '\u2026');
@@ -325,7 +478,9 @@ window.geotab.addin.nhtsaRecalls = function () {
         var withVin = (devices || []).filter(function (d) {
           return d.vehicleIdentificationNumber && d.vehicleIdentificationNumber.replace(/\s/g, '').length >= 6;
         });
-        var missingVinCount = (devices || []).length - withVin.length;
+        var noVinDevices = (devices || []).filter(function (d) {
+          return !d.vehicleIdentificationNumber || d.vehicleIdentificationNumber.replace(/\s/g, '').length < 6;
+        }).map(function (d) { return d.name; });
 
         updateStat('scanned', withVin.length);
 
@@ -368,7 +523,7 @@ window.geotab.addin.nhtsaRecalls = function () {
 
           function queryNext(idx) {
             if (idx >= comboList.length) {
-              mergeAndRender(withVin, vinMap, comboMap, recallCache, missingVinCount);
+              mergeAndRender(withVin, vinMap, comboMap, recallCache, noVinDevices);
               return;
             }
             var combo = comboList[idx];
@@ -453,13 +608,14 @@ window.geotab.addin.nhtsaRecalls = function () {
   }
 
   // ── Merge & render ─────────────────────────────────────────────────────────
-  function mergeAndRender(withVin, vinMap, comboMap, recallCache, missingVinCount) {
+  function mergeAndRender(withVin, vinMap, comboMap, recallCache, noVinDevices) {
     fleetData = [];
+    missingVinDevices = noVinDevices || [];
     withVin.forEach(function (d) {
       var vin  = d.vehicleIdentificationNumber.replace(/\s/g, '').toUpperCase();
       var info = vinMap[vin] || null;
       if (!info) {
-        fleetData.push({ name: d.name, vin: d.vehicleIdentificationNumber, make: '—', model: '—', modelYear: '—', recalls: [], hasParkIt: false, hasParkOutside: false, country: vinCountry(d.vehicleIdentificationNumber) });
+        fleetData.push({ name: d.name, vin: d.vehicleIdentificationNumber, make: '\u2014', model: '\u2014', modelYear: '\u2014', recalls: [], hasParkIt: false, hasParkOutside: false, country: vinCountry(d.vehicleIdentificationNumber) });
         return;
       }
       var key     = info.make + '|' + info.model + '|' + info.modelYear;
@@ -476,7 +632,6 @@ window.geotab.addin.nhtsaRecalls = function () {
 
     fleetData.sort(function (a, b) { return b.recalls.length - a.recalls.length; });
 
-    // Use recomputeStats so dismissed recalls are already excluded
     recomputeStats();
     showProgress(100, 'Scan complete.');
 
@@ -484,15 +639,17 @@ window.geotab.addin.nhtsaRecalls = function () {
       hideProgress();
       renderFleetTab();
       renderRecallsTab();
+      saveLastScan();
+      savePrevCampaigns();
       lockExportBtn(true);
+      lockPrintBtn(true);
       lockScanBtn(false);
       scanning = false;
 
       var msgs = [];
-      if (missingVinCount > 0) msgs.push(missingVinCount + ' vehicle(s) had no VIN and were skipped.');
+      if (missingVinDevices.length > 0) msgs.push(missingVinDevices.length + ' vehicle(s) had no VIN and were skipped (see Fleet Overview for details).');
 
       var caCount = fleetData.filter(function (v) { return v.country === 'CA'; }).length;
-      var usCount = fleetData.filter(function (v) { return v.country === 'US'; }).length;
       if (caCount > 0) msgs.push('Fleet includes ' + caCount + ' Canadian-manufactured VIN(s). NHTSA covers US-manufactured vehicles \u2014 use the Transport Canada links for Canadian recall data.');
       if (msgs.length) showStatus('info', msgs.join(' '));
       else hideStatus();
@@ -505,6 +662,11 @@ window.geotab.addin.nhtsaRecalls = function () {
     if (v.hasParkIt)             return '<span style="display:inline-flex;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:700;background:#FDE8E8;color:#C51A11;">&#9888; Park-It!</span>';
     if (v.hasParkOutside)        return '<span style="display:inline-flex;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:700;background:#FEF3C7;color:#92400E;">&#9888; Park Outside</span>';
     return '<span style="display:inline-flex;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:700;background:#FFF8E1;color:#7A5A00;">Open Recall(s)</span>';
+  }
+
+  // NEW badge HTML
+  function newBadge() {
+    return '<span style="display:inline-flex;padding:1px 5px;border-radius:8px;font-size:10px;font-weight:700;background:#0069BF;color:#fff;margin-left:5px;vertical-align:middle;">NEW</span>';
   }
 
   // ── Render: Fleet Overview (with drill-down + dismiss) ────────────────────
@@ -525,11 +687,10 @@ window.geotab.addin.nhtsaRecalls = function () {
       var dismissed     = v.recalls.length - active.length;
       var bg            = i % 2 === 0 ? '#fff' : '#F9FAFB';
       var detId         = 'nhtsa-vdet-' + i;
-      var tcUrl         = (v.make !== '—') ? tcLink(v.make, v.model, v.modelYear) : TC_SEARCH;
+      var tcUrl         = (v.make !== '\u2014') ? tcLink(v.make, v.model, v.modelYear) : TC_SEARCH;
       var fakev         = { recalls: active, hasParkIt: active.some(function (r) { return r.parkIt; }), hasParkOutside: active.some(function (r) { return r.parkOutSide; }) };
       var countColor    = active.length > 0 ? '#C51A11' : '#1B5E30';
 
-      // Summary row — click to expand
       html += '<tr style="background:' + bg + ';cursor:pointer;" onclick="(function(){var d=document.getElementById(\'' + detId + '\');d.style.display=d.style.display===\'none\'?\'table-row\':\'none\';})();">' +
         '<td style="' + tdStyle() + 'text-align:center;color:#4E677E;font-size:14px;">&#9660;</td>' +
         '<td style="' + tdStyle() + 'font-weight:700;color:#1F2833;">' + escHtml(v.name) + '</td>' +
@@ -555,6 +716,7 @@ window.geotab.addin.nhtsaRecalls = function () {
           '<th style="padding:7px 14px;font-weight:700;color:#4E677E;font-size:10px;text-transform:uppercase;text-align:left;">Campaign #</th>' +
           '<th style="padding:7px 14px;font-weight:700;color:#4E677E;font-size:10px;text-transform:uppercase;text-align:left;">Component</th>' +
           '<th style="padding:7px 14px;font-weight:700;color:#4E677E;font-size:10px;text-transform:uppercase;text-align:left;">Date</th>' +
+          '<th style="padding:7px 14px;font-weight:700;color:#4E677E;font-size:10px;text-transform:uppercase;text-align:left;">Days Open</th>' +
           '<th style="padding:7px 14px;font-weight:700;color:#4E677E;font-size:10px;text-transform:uppercase;text-align:left;">Severity</th>' +
           '<th style="padding:7px 14px;font-weight:700;color:#4E677E;font-size:10px;text-transform:uppercase;text-align:left;">Summary</th>' +
           '<th style="padding:7px 14px;"></th>' +
@@ -566,12 +728,18 @@ window.geotab.addin.nhtsaRecalls = function () {
                    : r.parkOutSide ? '<span style="padding:2px 6px;border-radius:10px;background:#FEF3C7;color:#92400E;font-size:10px;font-weight:700;">&#9888; Park Outside</span>'
                    : '<span style="padding:2px 6px;border-radius:10px;background:#FFF8E1;color:#7A5A00;font-size:10px;font-weight:700;">Standard</span>';
           var camp = r.NHTSACampaignNumber.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+          var days = daysOpen(r.ReportReceivedDate);
+          var daysColor  = days > 365 ? '#C51A11' : (days >= 90 ? '#B45309' : '#4E677E');
+          var daysWeight = days >= 90 ? '700' : '400';
+          var daysHtml   = days >= 0 ? '<span style="color:' + daysColor + ';font-weight:' + daysWeight + ';">' + days + 'd</span>' : '&mdash;';
+
           html += '<tr style="background:' + rbg + ';">' +
-            '<td style="padding:8px 14px;font-family:monospace;font-weight:700;color:#25477B;">' + escHtml(r.NHTSACampaignNumber) + '</td>' +
+            '<td style="padding:8px 14px;font-family:monospace;font-weight:700;color:#25477B;">' + escHtml(r.NHTSACampaignNumber) + (isNew(r.NHTSACampaignNumber) ? newBadge() : '') + '</td>' +
             '<td style="padding:8px 14px;color:#1F2833;">' + escHtml(r.Component) + '</td>' +
             '<td style="padding:8px 14px;color:#4E677E;white-space:nowrap;">' + escHtml(r.ReportReceivedDate) + '</td>' +
+            '<td style="padding:8px 14px;">' + daysHtml + '</td>' +
             '<td style="padding:8px 14px;">' + sev + '</td>' +
-            '<td style="padding:8px 14px;color:#4E677E;max-width:220px;" title="' + escHtml(r.Summary) + '">' + escHtml((r.Summary || '').substring(0,80)) + (r.Summary && r.Summary.length > 80 ? '\u2026' : '') + '</td>' +
+            '<td style="padding:8px 14px;color:#4E677E;max-width:200px;" title="' + escHtml(r.Summary) + '">' + escHtml((r.Summary || '').substring(0,80)) + (r.Summary && r.Summary.length > 80 ? '\u2026' : '') + '</td>' +
             '<td style="padding:8px 14px;text-align:right;white-space:nowrap;">' +
               '<button onclick="event.stopPropagation();window._nhtsa&&window._nhtsa.dismiss(\'' + camp + '\');" style="padding:4px 10px;background:#E8F5ED;color:#1B5E30;border:1.5px solid #A8D5B5;border-radius:4px;font-size:11px;font-weight:700;cursor:pointer;font-family:\'Nunito Sans\',sans-serif;">&#10003; Mark Serviced</button>' +
             '</td></tr>';
@@ -587,6 +755,22 @@ window.geotab.addin.nhtsaRecalls = function () {
     });
 
     html += '</tbody></table>';
+
+    // Missing VIN collapsible section
+    if (missingVinDevices.length > 0) {
+      var mvId = 'nhtsa-missing-vin-list';
+      html += '<div style="margin-top:12px;border:1.5px solid #F5CC70;border-radius:8px;overflow:hidden;">' +
+        '<div style="background:#FEF9EC;padding:10px 16px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;" onclick="(function(){var l=document.getElementById(\'' + mvId + '\');l.style.display=l.style.display===\'none\'?\'block\':\'none\';})();">' +
+        '<span style="font-size:12px;font-weight:700;color:#92400E;text-transform:uppercase;font-family:\'Nunito Sans\',sans-serif;">&#9888; Missing VIN — ' + missingVinDevices.length + ' vehicle(s) skipped</span>' +
+        '<span style="font-size:11px;color:#B45309;font-family:\'Nunito Sans\',sans-serif;">Click to expand &nbsp;&#9660;</span>' +
+        '</div>' +
+        '<div id="' + mvId + '" style="display:none;padding:12px 16px;background:#FFFDF5;">' +
+        '<div style="font-size:11px;color:#92400E;margin-bottom:8px;font-family:\'Nunito Sans\',sans-serif;">Add VINs under Administration &rarr; Vehicles to enable recall scanning for these assets:</div>' +
+        '<div style="columns:2;column-gap:24px;font-size:12px;color:#4E677E;font-family:\'Nunito Sans\',sans-serif;line-height:1.9;">' +
+        missingVinDevices.map(function (n) { return '<div>' + escHtml(n) + '</div>'; }).join('') +
+        '</div></div></div>';
+    }
+
     wrap.innerHTML = html;
   }
 
@@ -595,7 +779,6 @@ window.geotab.addin.nhtsaRecalls = function () {
     var wrap = el('nhtsa-recalls-table-wrap');
     if (!wrap) return;
 
-    // Build campaign map for ACTIVE recalls only
     var activeMap   = {};
     var dismissedMap = {};
 
@@ -625,7 +808,7 @@ window.geotab.addin.nhtsaRecalls = function () {
       html += '<table style="width:100%;border-collapse:collapse;font-size:13px;font-family:\'Nunito Sans\',sans-serif;">' +
         '<thead><tr style="background:#25477B;">' +
         '<th style="' + thStyle() + 'width:28px;"></th>' +
-        th('Campaign #') + th('Date') + th('Component') +
+        th('Campaign #') + th('Date') + th('Days Open') + th('Component') +
         '<th style="' + thStyle() + 'text-align:center;">Vehicles</th>' +
         th('Severity') + th('Summary') + '<th style="' + thStyle() + '"></th>' +
         '</tr></thead><tbody>';
@@ -637,21 +820,26 @@ window.geotab.addin.nhtsaRecalls = function () {
                   : c.parkOutside ? '<span style="padding:2px 8px;border-radius:12px;font-size:11px;font-weight:700;background:#FEF3C7;color:#92400E;">&#9888; Park Outside</span>'
                   : '<span style="padding:2px 8px;border-radius:12px;font-size:11px;font-weight:700;background:#FFF8E1;color:#7A5A00;">Standard</span>';
         var camp = c.campaign.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+        var days = daysOpen(c.date);
+        var daysColor  = days > 365 ? '#C51A11' : (days >= 90 ? '#B45309' : '#4E677E');
+        var daysWeight = days >= 90 ? '700' : '400';
+        var daysHtml   = days >= 0 ? '<span style="color:' + daysColor + ';font-weight:' + daysWeight + ';">' + days + 'd</span>' : '&mdash;';
 
         html += '<tr style="background:' + bg + ';cursor:pointer;" onclick="(function(){var d=document.getElementById(\'' + detId + '\');d.style.display=d.style.display===\'none\'?\'table-row\':\'none\';})();">' +
           '<td style="' + tdStyle() + 'text-align:center;color:#4E677E;">&#9660;</td>' +
-          '<td style="' + tdStyle() + 'font-family:monospace;font-size:12px;font-weight:700;color:#25477B;">' + escHtml(c.campaign) + '</td>' +
+          '<td style="' + tdStyle() + 'font-family:monospace;font-size:12px;font-weight:700;color:#25477B;">' + escHtml(c.campaign) + (isNew(c.campaign) ? newBadge() : '') + '</td>' +
           '<td style="' + tdStyle() + 'white-space:nowrap;color:#4E677E;font-size:12px;">' + escHtml(c.date) + '</td>' +
+          '<td style="' + tdStyle() + '">' + daysHtml + '</td>' +
           '<td style="' + tdStyle() + 'font-size:12px;">' + escHtml(c.component) + '</td>' +
           '<td style="' + tdStyle() + 'text-align:center;font-weight:700;color:#0069BF;">' + c.vehicles.length + '</td>' +
           '<td style="' + tdStyle() + '">' + sev + '</td>' +
-          '<td style="' + tdStyle() + 'color:#4E677E;max-width:240px;" title="' + escHtml(c.summary) + '">' + escHtml((c.summary || '').substring(0,90)) + (c.summary && c.summary.length > 90 ? '\u2026' : '') + '</td>' +
+          '<td style="' + tdStyle() + 'color:#4E677E;max-width:220px;" title="' + escHtml(c.summary) + '">' + escHtml((c.summary || '').substring(0,80)) + (c.summary && c.summary.length > 80 ? '\u2026' : '') + '</td>' +
           '<td style="' + tdStyle() + 'text-align:right;" onclick="event.stopPropagation();">' +
             '<button onclick="window._nhtsa&&window._nhtsa.dismiss(\'' + camp + '\');" style="padding:4px 10px;background:#E8F5ED;color:#1B5E30;border:1.5px solid #A8D5B5;border-radius:4px;font-size:11px;font-weight:700;cursor:pointer;font-family:\'Nunito Sans\',sans-serif;white-space:nowrap;">&#10003; Mark Serviced</button>' +
           '</td></tr>';
 
         html += '<tr id="' + detId + '" style="display:none;background:#F2F5F7;">' +
-          '<td colspan="8" style="padding:16px 20px;border-bottom:1px solid #D9E1E8;">' +
+          '<td colspan="9" style="padding:16px 20px;border-bottom:1px solid #D9E1E8;">' +
           '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:12px;">' +
           detailBlock('Full Summary', c.summary, '#1F2833') +
           detailBlock('Consequence', c.consequence, '#1F2833') +
@@ -667,7 +855,7 @@ window.geotab.addin.nhtsaRecalls = function () {
       html += '</tbody></table>';
     }
 
-    // Dismissed section
+    // Dismissed section with service notes
     if (dismissed.length > 0) {
       html += '<div style="margin-top:20px;border:1.5px solid #D9E1E8;border-radius:8px;overflow:hidden;">' +
         '<div style="background:#F2F5F7;padding:10px 16px;display:flex;justify-content:space-between;align-items:center;">' +
@@ -679,11 +867,20 @@ window.geotab.addin.nhtsaRecalls = function () {
 
       dismissed.forEach(function (c) {
         var camp = c.campaign.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+        var info = dismissedRecalls[c.campaign];
+        var serviceDate = (info && typeof info === 'object' && info.serviceDate) ? info.serviceDate : '';
+        var svcNotes    = (info && typeof info === 'object' && info.notes)       ? info.notes       : '';
+        var serviceStr  = '';
+        if (serviceDate) serviceStr += 'Serviced: ' + serviceDate;
+        if (svcNotes)    serviceStr += (serviceStr ? ' \u2014 ' : '') + svcNotes;
+
         html += '<tr style="background:#fff;">' +
           '<td style="padding:9px 14px;font-family:monospace;font-weight:700;color:#8DA4B9;text-decoration:line-through;">' + escHtml(c.campaign) + '</td>' +
           '<td style="padding:9px 14px;color:#8DA4B9;font-size:12px;">' + escHtml(c.component) + '</td>' +
           '<td style="padding:9px 14px;color:#8DA4B9;font-size:12px;">' + escHtml(c.date) + '</td>' +
-          '<td style="padding:9px 14px;color:#8DA4B9;font-size:12px;">' + c.vehicles.length + ' vehicle(s)</td>' +
+          '<td style="padding:9px 14px;color:#8DA4B9;font-size:12px;">' + c.vehicles.length + ' vehicle(s)' +
+            (serviceStr ? '<div style="font-size:11px;color:#B0BEC5;margin-top:2px;">' + escHtml(serviceStr) + '</div>' : '') +
+          '</td>' +
           '<td style="padding:9px 14px;text-align:right;">' +
             '<button onclick="window._nhtsa&&window._nhtsa.restore(\'' + camp + '\');" style="padding:4px 10px;background:#fff;color:#C51A11;border:1.5px solid #F5A0A0;border-radius:4px;font-size:11px;font-weight:700;cursor:pointer;font-family:\'Nunito Sans\',sans-serif;">&#8635; Restore</button>' +
           '</td></tr>';
@@ -752,7 +949,7 @@ window.geotab.addin.nhtsaRecalls = function () {
       '<table style="width:100%;border-collapse:collapse;font-size:13px;font-family:\'Nunito Sans\',sans-serif;">' +
       '<thead><tr style="background:#25477B;">' +
       '<th style="' + thStyle() + 'width:28px;"></th>' +
-      th('Campaign #') + th('Date') + th('Component') + th('Severity') + th('Summary') +
+      th('Campaign #') + th('Date') + th('Days Open') + th('Component') + th('Severity') + th('Summary') +
       '</tr></thead><tbody>';
 
     recalls.forEach(function (r, i) {
@@ -761,18 +958,23 @@ window.geotab.addin.nhtsaRecalls = function () {
       var sev   = r.parkIt ? '<span style="padding:2px 8px;border-radius:12px;font-size:11px;font-weight:700;background:#FDE8E8;color:#C51A11;">&#9888; Park-It!</span>'
                 : r.parkOutSide ? '<span style="padding:2px 8px;border-radius:12px;font-size:11px;font-weight:700;background:#FEF3C7;color:#92400E;">&#9888; Park Outside</span>'
                 : '<span style="padding:2px 8px;border-radius:12px;font-size:11px;font-weight:700;background:#FFF8E1;color:#7A5A00;">Standard</span>';
+      var days = daysOpen(r.ReportReceivedDate);
+      var daysColor  = days > 365 ? '#C51A11' : (days >= 90 ? '#B45309' : '#4E677E');
+      var daysWeight = days >= 90 ? '700' : '400';
+      var daysHtml   = days >= 0 ? '<span style="color:' + daysColor + ';font-weight:' + daysWeight + ';">' + days + 'd</span>' : '&mdash;';
 
       html += '<tr style="background:' + bg + ';cursor:pointer;" onclick="(function(){var d=document.getElementById(\'' + detId + '\');d.style.display=d.style.display===\'none\'?\'table-row\':\'none\';})();">' +
         '<td style="' + tdStyle() + 'text-align:center;color:#4E677E;">&#9660;</td>' +
         '<td style="' + tdStyle() + 'font-family:monospace;font-size:12px;font-weight:700;color:#25477B;">' + escHtml(r.NHTSACampaignNumber) + '</td>' +
         '<td style="' + tdStyle() + 'white-space:nowrap;color:#4E677E;font-size:12px;">' + escHtml(r.ReportReceivedDate) + '</td>' +
+        '<td style="' + tdStyle() + '">' + daysHtml + '</td>' +
         '<td style="' + tdStyle() + 'font-size:12px;">' + escHtml(r.Component) + '</td>' +
         '<td style="' + tdStyle() + '">' + sev + '</td>' +
         '<td style="' + tdStyle() + 'color:#4E677E;" title="' + escHtml(r.Summary) + '">' + escHtml((r.Summary || '').substring(0, 90)) + (r.Summary && r.Summary.length > 90 ? '\u2026' : '') + '</td>' +
         '</tr>';
 
       html += '<tr id="' + detId + '" style="display:none;background:#F2F5F7;">' +
-        '<td colspan="6" style="padding:16px 20px;">' +
+        '<td colspan="7" style="padding:16px 20px;">' +
         '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">' +
         detailBlock('Full Summary', r.Summary, '#1F2833') +
         detailBlock('Consequence', r.Consequence, '#1F2833') +
@@ -788,13 +990,14 @@ window.geotab.addin.nhtsaRecalls = function () {
   // ── Export CSV ─────────────────────────────────────────────────────────────
   function exportCSV() {
     if (!fleetData.length) return;
-    var rows = [['Vehicle Name','VIN','Country (Mfg)','Make','Model','Year','Campaign #','Component','Date Received','Park-It','Park Outside','Summary','Consequence','Remedy','Transport Canada Link']];
+    var rows = [['Vehicle Name','VIN','Country (Mfg)','Make','Model','Year','Campaign #','Component','Date Received','Days Open','Park-It','Park Outside','Summary','Consequence','Remedy','Transport Canada Link']];
     fleetData.forEach(function (v) {
       if (v.recalls.length === 0) {
-        rows.push([v.name, v.vin, v.country, v.make, v.model, v.modelYear, 'No NHTSA recalls', '', '', '', '', '', '', '', (v.make !== '—' ? tcLink(v.make, v.model, v.modelYear) : TC_SEARCH)]);
+        rows.push([v.name, v.vin, v.country, v.make, v.model, v.modelYear, 'No NHTSA recalls', '', '', '', '', '', '', '', '', (v.make !== '\u2014' ? tcLink(v.make, v.model, v.modelYear) : TC_SEARCH)]);
       } else {
         v.recalls.forEach(function (r) {
-          rows.push([v.name, v.vin, v.country, v.make, v.model, v.modelYear, r.NHTSACampaignNumber, r.Component, r.ReportReceivedDate, r.parkIt ? 'YES' : 'NO', r.parkOutSide ? 'YES' : 'NO', r.Summary, r.Consequence, r.Remedy, tcLink(v.make, v.model, v.modelYear)]);
+          var days = daysOpen(r.ReportReceivedDate);
+          rows.push([v.name, v.vin, v.country, v.make, v.model, v.modelYear, r.NHTSACampaignNumber, r.Component, r.ReportReceivedDate, days >= 0 ? days : '', r.parkIt ? 'YES' : 'NO', r.parkOutSide ? 'YES' : 'NO', r.Summary, r.Consequence, r.Remedy, tcLink(v.make, v.model, v.modelYear)]);
         });
       }
     });
@@ -810,6 +1013,125 @@ window.geotab.addin.nhtsaRecalls = function () {
     a.href = url; a.download = 'Recall_Dashboard_' + new Date().toISOString().slice(0, 10) + '.csv';
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  }
+
+  // ── Print Report ───────────────────────────────────────────────────────────
+  function printReport() {
+    if (!fleetData.length) return;
+
+    var affected    = fleetData.filter(function (v) { return getActiveRecalls(v).length > 0; }).length;
+    var allIds      = {};
+    fleetData.forEach(function (v) { getActiveRecalls(v).forEach(function (r) { allIds[r.NHTSACampaignNumber] = true; }); });
+    var parkItCount = fleetData.filter(function (v) { return getActiveRecalls(v).some(function (r) { return r.parkIt; }); }).length;
+
+    var dismissedCamps = {};
+    fleetData.forEach(function (v) {
+      v.recalls.forEach(function (r) {
+        if (isDismissed(r.NHTSACampaignNumber)) {
+          var key = r.NHTSACampaignNumber;
+          if (!dismissedCamps[key]) dismissedCamps[key] = { campaign: key, component: r.Component, date: r.ReportReceivedDate, vehicles: [] };
+          dismissedCamps[key].vehicles.push(v.name);
+        }
+      });
+    });
+    var dismissedList = Object.keys(dismissedCamps).map(function (k) { return dismissedCamps[k]; });
+
+    var scanTs  = localStorage.getItem(LS_SCAN);
+    var scanStr = scanTs ? new Date(scanTs).toLocaleString() : 'Unknown';
+
+    var printHtml = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Recall Report ' + new Date().toLocaleDateString() + '</title><style>' +
+      'body{font-family:Arial,Helvetica,sans-serif;font-size:12px;margin:24px;color:#1F2833;}' +
+      'h1{font-size:20px;color:#25477B;margin:0 0 4px;}' +
+      '.subtitle{font-size:11px;color:#4E677E;margin:0 0 20px;}' +
+      '.stats{display:flex;gap:14px;margin-bottom:24px;flex-wrap:wrap;}' +
+      '.stat{border:1px solid #D9E1E8;border-radius:6px;padding:10px 16px;min-width:110px;}' +
+      '.stat-label{font-size:9px;color:#4E677E;text-transform:uppercase;font-weight:700;letter-spacing:0.4px;}' +
+      '.stat-value{font-size:22px;font-weight:700;color:#1F2833;}' +
+      '.section-title{font-size:13px;font-weight:700;color:#25477B;margin:24px 0 8px;padding-bottom:4px;border-bottom:2px solid #25477B;}' +
+      '.vehicle-title{font-size:12px;font-weight:700;margin:14px 0 4px;color:#1F2833;}' +
+      'table{width:100%;border-collapse:collapse;margin-bottom:16px;page-break-inside:avoid;}' +
+      'th{background:#25477B;color:#fff;padding:7px 10px;text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:0.3px;}' +
+      'td{padding:6px 10px;border-bottom:1px solid #F2F5F7;font-size:11px;}' +
+      'tr:nth-child(even) td{background:#F9FAFB;}' +
+      '.badge-parkit{background:#FDE8E8;color:#C51A11;padding:1px 6px;border-radius:8px;font-size:9px;font-weight:700;}' +
+      '.badge-outside{background:#FEF3C7;color:#92400E;padding:1px 6px;border-radius:8px;font-size:9px;font-weight:700;}' +
+      '.badge-std{background:#FFF8E1;color:#7A5A00;padding:1px 6px;border-radius:8px;font-size:9px;font-weight:700;}' +
+      '.dim{color:#8DA4B9;}' +
+      '@media print{@page{margin:16mm;}button{display:none;}}' +
+      '</style></head><body>';
+
+    printHtml += '<h1>Vehicle Recall Dashboard Report</h1>';
+    printHtml += '<div class="subtitle">Generated: ' + new Date().toLocaleString() + '&nbsp;&nbsp;|&nbsp;&nbsp;Scan date: ' + scanStr + '</div>';
+
+    // Summary stats
+    printHtml += '<div class="stats">';
+    printHtml += '<div class="stat"><div class="stat-label">Vehicles Scanned</div><div class="stat-value">' + fleetData.length + '</div></div>';
+    printHtml += '<div class="stat"><div class="stat-label">Vehicles Affected</div><div class="stat-value">' + affected + '</div></div>';
+    printHtml += '<div class="stat"><div class="stat-label">Open Recalls</div><div class="stat-value">' + Object.keys(allIds).length + '</div></div>';
+    printHtml += '<div class="stat"><div class="stat-label">Park-It Alerts</div><div class="stat-value" style="color:#C51A11;">' + parkItCount + '</div></div>';
+    if (missingVinDevices.length > 0) printHtml += '<div class="stat"><div class="stat-label">Missing VINs</div><div class="stat-value" style="color:#B45309;">' + missingVinDevices.length + '</div></div>';
+    printHtml += '</div>';
+
+    // Active recalls by vehicle
+    printHtml += '<div class="section-title">Active Recalls by Vehicle</div>';
+    var vehiclesWithRecalls = fleetData.filter(function (v) { return getActiveRecalls(v).length > 0; });
+    if (vehiclesWithRecalls.length === 0) {
+      printHtml += '<p style="color:#1B5E30;">&#10003; No active recalls found across the fleet.</p>';
+    } else {
+      vehiclesWithRecalls.forEach(function (v) {
+        var active = getActiveRecalls(v);
+        printHtml += '<div class="vehicle-title">' + v.name + ' &mdash; ' + v.vin + ' &mdash; ' + v.make + ' ' + v.model + ' ' + v.modelYear + '</div>';
+        printHtml += '<table><thead><tr><th>Campaign #</th><th>Component</th><th>Date</th><th>Days Open</th><th>Severity</th><th>Summary</th></tr></thead><tbody>';
+        active.forEach(function (r) {
+          var days    = daysOpen(r.ReportReceivedDate);
+          var daysStr = days >= 0 ? days + 'd' : '—';
+          var daysColor = days > 365 ? 'color:#C51A11;font-weight:700;' : (days >= 90 ? 'color:#B45309;font-weight:700;' : '');
+          var sev = r.parkIt ? '<span class="badge-parkit">Park-It!</span>' : (r.parkOutSide ? '<span class="badge-outside">Park Outside</span>' : '<span class="badge-std">Standard</span>');
+          printHtml += '<tr><td style="font-family:monospace;font-weight:700;">' + r.NHTSACampaignNumber + '</td>' +
+            '<td>' + r.Component + '</td>' +
+            '<td style="white-space:nowrap;">' + r.ReportReceivedDate + '</td>' +
+            '<td style="' + daysColor + '">' + daysStr + '</td>' +
+            '<td>' + sev + '</td>' +
+            '<td>' + (r.Summary || '').substring(0, 120) + (r.Summary && r.Summary.length > 120 ? '...' : '') + '</td></tr>';
+        });
+        printHtml += '</tbody></table>';
+      });
+    }
+
+    // Dismissed recalls
+    if (dismissedList.length > 0) {
+      printHtml += '<div class="section-title">Serviced / Dismissed Recalls (' + dismissedList.length + ')</div>';
+      printHtml += '<table><thead><tr><th>Campaign #</th><th>Component</th><th>Date</th><th>Vehicles</th><th>Service Date</th><th>Notes</th></tr></thead><tbody>';
+      dismissedList.forEach(function (c) {
+        var info        = dismissedRecalls[c.campaign];
+        var serviceDate = (info && typeof info === 'object' && info.serviceDate) ? info.serviceDate : '—';
+        var svcNotes    = (info && typeof info === 'object' && info.notes)       ? info.notes       : '—';
+        printHtml += '<tr class="dim"><td style="font-family:monospace;text-decoration:line-through;">' + c.campaign + '</td>' +
+          '<td>' + c.component + '</td>' +
+          '<td style="white-space:nowrap;">' + c.date + '</td>' +
+          '<td>' + c.vehicles.join(', ') + '</td>' +
+          '<td style="white-space:nowrap;">' + serviceDate + '</td>' +
+          '<td>' + svcNotes + '</td></tr>';
+      });
+      printHtml += '</tbody></table>';
+    }
+
+    // Missing VINs
+    if (missingVinDevices.length > 0) {
+      printHtml += '<div class="section-title">Missing VINs — ' + missingVinDevices.length + ' Vehicle(s) Skipped</div>';
+      printHtml += '<p style="font-size:11px;color:#4E677E;margin:0 0 8px;">The following vehicles were excluded from the recall scan because no VIN is on file. Add VINs under Administration &rarr; Vehicles.</p>';
+      printHtml += '<ul style="margin:0;padding-left:20px;font-size:11px;color:#4E677E;line-height:1.8;">' +
+        missingVinDevices.map(function (n) { return '<li>' + n + '</li>'; }).join('') + '</ul>';
+    }
+
+    printHtml += '</body></html>';
+
+    var win = window.open('', '_blank');
+    if (win) {
+      win.document.write(printHtml);
+      win.document.close();
+      setTimeout(function () { win.print(); }, 600);
+    }
   }
 
   // ── Table style helpers ────────────────────────────────────────────────────
@@ -834,6 +1156,7 @@ window.geotab.addin.nhtsaRecalls = function () {
       '@keyframes nhtsa-spin { to { transform:rotate(360deg); } }',
       '#nhtsa-app table tbody tr:hover td { background:#E6F0FA !important; }',
       '#nhtsa-app input:focus { outline:none !important; border-color:#0069BF !important; }',
+      '#nhtsa-app textarea:focus { outline:none !important; border-color:#0069BF !important; }',
       '#nhtsa-app a:hover { text-decoration:underline !important; }'
     ].join('\n');
     // Append to body, not head — avoids MyGeotab's head mutation stripping
