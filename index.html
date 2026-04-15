@@ -115,8 +115,10 @@ window.geotab.addin = window.geotab.addin || {};
 window.geotab.addin.nhtsaRecalls = function () {
 
   var api, state;
-  var fleetData = [];
-  var scanning  = false;
+  var fleetData       = [];
+  var scanning        = false;
+  var dismissedRecalls = {};   // { campaignNumber: true } — persisted in localStorage
+  var LS_KEY          = 'nhtsa-recall-dismissed';
 
   // TC recall search base URL — deeplinks to their search results
   var TC_SEARCH = 'https://wwwapps.tc.gc.ca/Saf-Sec-Sur/7/VRDB-BDRV/search-recherche/lst?lang=eng';
@@ -126,8 +128,11 @@ window.geotab.addin.nhtsaRecalls = function () {
     initialize: function (fa, fs, cb) {
       api = fa; state = fs;
       injectStyles();
-      initPanels();   // hide non-active panels via JS (not HTML attr)
+      loadDismissed();
+      initPanels();
       wireEvents();
+      // Expose dismiss/restore for onclick handlers in dynamically built HTML
+      window._nhtsa = { dismiss: dismissRecall, restore: restoreRecall };
       cb();
     },
     focus: function (fa, fs) { api = fa; state = fs; },
@@ -212,6 +217,52 @@ window.geotab.addin.nhtsaRecalls = function () {
     if (!b) return;
     b.disabled = !enabled;
     b.style.opacity = enabled ? '1' : '0.5';
+  }
+
+  // ── Dismiss helpers (localStorage-backed) ─────────────────────────────────
+  function loadDismissed() {
+    try { dismissedRecalls = JSON.parse(localStorage.getItem(LS_KEY) || '{}'); }
+    catch (e) { dismissedRecalls = {}; }
+  }
+
+  function saveDismissed() {
+    try { localStorage.setItem(LS_KEY, JSON.stringify(dismissedRecalls)); }
+    catch (e) {}
+  }
+
+  function isDismissed(campaignNumber) { return !!dismissedRecalls[campaignNumber]; }
+
+  function dismissRecall(campaignNumber) {
+    dismissedRecalls[campaignNumber] = true;
+    saveDismissed();
+    recomputeStats();
+    renderFleetTab();
+    renderRecallsTab();
+  }
+
+  function restoreRecall(campaignNumber) {
+    delete dismissedRecalls[campaignNumber];
+    saveDismissed();
+    recomputeStats();
+    renderFleetTab();
+    renderRecallsTab();
+  }
+
+  // Returns only non-dismissed recalls for a vehicle
+  function getActiveRecalls(v) {
+    return v.recalls.filter(function (r) { return !isDismissed(r.NHTSACampaignNumber); });
+  }
+
+  // Recompute summary stats from current fleetData + dismissed state
+  function recomputeStats() {
+    if (!fleetData.length) return;
+    var affected    = fleetData.filter(function (v) { return getActiveRecalls(v).length > 0; }).length;
+    var allIds      = {};
+    fleetData.forEach(function (v) { getActiveRecalls(v).forEach(function (r) { allIds[r.NHTSACampaignNumber] = true; }); });
+    var parkItCount = fleetData.filter(function (v) { return getActiveRecalls(v).some(function (r) { return r.parkIt; }); }).length;
+    updateStat('affected', affected);
+    updateStat('recalls',  Object.keys(allIds).length);
+    updateStat('parkit',   parkItCount);
   }
 
   // ── Event wiring ───────────────────────────────────────────────────────────
@@ -426,14 +477,8 @@ window.geotab.addin.nhtsaRecalls = function () {
 
     fleetData.sort(function (a, b) { return b.recalls.length - a.recalls.length; });
 
-    var affected = fleetData.filter(function (v) { return v.recalls.length > 0; }).length;
-    var allIds   = {};
-    fleetData.forEach(function (v) { v.recalls.forEach(function (r) { allIds[r.NHTSACampaignNumber] = true; }); });
-    var parkItCount = fleetData.filter(function (v) { return v.hasParkIt; }).length;
-
-    updateStat('affected', affected);
-    updateStat('recalls',  Object.keys(allIds).length);
-    updateStat('parkit',   parkItCount);
+    // Use recomputeStats so dismissed recalls are already excluded
+    recomputeStats();
     showProgress(100, 'Scan complete.');
 
     setTimeout(function () {
@@ -463,106 +508,191 @@ window.geotab.addin.nhtsaRecalls = function () {
     return '<span style="display:inline-flex;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:700;background:#FFF8E1;color:#7A5A00;">Open Recall(s)</span>';
   }
 
-  // ── Render: Fleet Overview ─────────────────────────────────────────────────
+  // ── Render: Fleet Overview (with drill-down + dismiss) ────────────────────
   function renderFleetTab() {
     var wrap = el('nhtsa-fleet-table-wrap');
     if (!wrap || !fleetData.length) return;
 
     var html = '<table style="width:100%;border-collapse:collapse;font-size:13px;font-family:\'Nunito Sans\',sans-serif;">' +
       '<thead><tr style="background:#25477B;">' +
-      th('Vehicle Name') + th('VIN') + th('Make') + th('Model') + th('Year') +
+      '<th style="' + thStyle() + 'width:28px;"></th>' +
+      th('Vehicle Name') + th('VIN') + th('Make / Model / Year') +
       '<th style="' + thStyle() + 'text-align:center;">Recalls</th>' +
       th('Severity') + th('Transport Canada') +
       '</tr></thead><tbody>';
 
     fleetData.forEach(function (v, i) {
-      var bg = i % 2 === 0 ? '#fff' : '#F9FAFB';
-      var tcUrl = (v.make !== '—') ? tcLink(v.make, v.model, v.modelYear) : TC_SEARCH;
-      html += '<tr style="background:' + bg + ';">' +
-        td('<strong style="color:#1F2833;">' + escHtml(v.name) + '</strong>') +
-        td('<span style="font-family:monospace;font-size:12px;color:#4E677E;">' + escHtml(v.vin) + '</span>') +
-        td(escHtml(v.make)) + td(escHtml(v.model)) + td(escHtml(v.modelYear)) +
-        '<td style="' + tdStyle() + 'text-align:center;font-weight:700;color:' + (v.recalls.length > 0 ? '#C51A11' : '#1B5E30') + ';">' + v.recalls.length + '</td>' +
-        td(severityBadge(v)) +
-        '<td style="' + tdStyle() + '">' +
-          '<a href="' + escHtml(tcUrl) + '" target="_blank" rel="noopener" style="color:#0069BF;font-size:12px;font-weight:600;text-decoration:none;">TC Search &#8599;</a>' +
+      var active        = getActiveRecalls(v);
+      var dismissed     = v.recalls.length - active.length;
+      var bg            = i % 2 === 0 ? '#fff' : '#F9FAFB';
+      var detId         = 'nhtsa-vdet-' + i;
+      var tcUrl         = (v.make !== '—') ? tcLink(v.make, v.model, v.modelYear) : TC_SEARCH;
+      var fakev         = { recalls: active, hasParkIt: active.some(function (r) { return r.parkIt; }), hasParkOutside: active.some(function (r) { return r.parkOutSide; }) };
+      var countColor    = active.length > 0 ? '#C51A11' : '#1B5E30';
+
+      // Summary row — click to expand
+      html += '<tr style="background:' + bg + ';cursor:pointer;" onclick="(function(){var d=document.getElementById(\'' + detId + '\');d.style.display=d.style.display===\'none\'?\'table-row\':\'none\';})();">' +
+        '<td style="' + tdStyle() + 'text-align:center;color:#4E677E;font-size:14px;">&#9660;</td>' +
+        '<td style="' + tdStyle() + 'font-weight:700;color:#1F2833;">' + escHtml(v.name) + '</td>' +
+        '<td style="' + tdStyle() + 'font-family:monospace;font-size:12px;color:#4E677E;">' + escHtml(v.vin) + '</td>' +
+        '<td style="' + tdStyle() + '">' + escHtml(v.make) + ' ' + escHtml(v.model) + ' ' + escHtml(v.modelYear) + '</td>' +
+        '<td style="' + tdStyle() + 'text-align:center;font-weight:700;color:' + countColor + ';">' + active.length +
+          (dismissed > 0 ? '<div style="font-size:10px;font-weight:400;color:#8DA4B9;">' + dismissed + ' serviced</div>' : '') +
         '</td>' +
+        '<td style="' + tdStyle() + '">' + severityBadge(fakev) + '</td>' +
+        '<td style="' + tdStyle() + '"><a href="' + escHtml(tcUrl) + '" target="_blank" rel="noopener" style="color:#0069BF;font-size:12px;font-weight:600;text-decoration:none;" onclick="event.stopPropagation()">TC Search &#8599;</a></td>' +
         '</tr>';
+
+      // Drill-down row
+      html += '<tr id="' + detId + '" style="display:none;"><td colspan="7" style="padding:0;border-bottom:2px solid #D9E1E8;">';
+
+      if (active.length === 0) {
+        html += '<div style="padding:14px 20px;background:#F2F5F7;font-size:13px;color:#1B5E30;font-family:\'Nunito Sans\',sans-serif;">&#10003; No active recalls.' +
+          (dismissed > 0 ? ' <span style="color:#8DA4B9;">' + dismissed + ' recall(s) marked as serviced.</span>' : '') +
+          '</div>';
+      } else {
+        html += '<table style="width:100%;border-collapse:collapse;font-size:12px;font-family:\'Nunito Sans\',sans-serif;">' +
+          '<thead><tr style="background:#E6EBEF;">' +
+          '<th style="padding:7px 14px;font-weight:700;color:#4E677E;font-size:10px;text-transform:uppercase;text-align:left;">Campaign #</th>' +
+          '<th style="padding:7px 14px;font-weight:700;color:#4E677E;font-size:10px;text-transform:uppercase;text-align:left;">Component</th>' +
+          '<th style="padding:7px 14px;font-weight:700;color:#4E677E;font-size:10px;text-transform:uppercase;text-align:left;">Date</th>' +
+          '<th style="padding:7px 14px;font-weight:700;color:#4E677E;font-size:10px;text-transform:uppercase;text-align:left;">Severity</th>' +
+          '<th style="padding:7px 14px;font-weight:700;color:#4E677E;font-size:10px;text-transform:uppercase;text-align:left;">Summary</th>' +
+          '<th style="padding:7px 14px;"></th>' +
+          '</tr></thead><tbody>';
+
+        active.forEach(function (r, ri) {
+          var rbg  = ri % 2 === 0 ? '#FAFBFC' : '#F2F5F7';
+          var sev  = r.parkIt      ? '<span style="padding:2px 6px;border-radius:10px;background:#FDE8E8;color:#C51A11;font-size:10px;font-weight:700;">&#9888; Park-It!</span>'
+                   : r.parkOutSide ? '<span style="padding:2px 6px;border-radius:10px;background:#FEF3C7;color:#92400E;font-size:10px;font-weight:700;">&#9888; Park Outside</span>'
+                   : '<span style="padding:2px 6px;border-radius:10px;background:#FFF8E1;color:#7A5A00;font-size:10px;font-weight:700;">Standard</span>';
+          var camp = r.NHTSACampaignNumber.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+          html += '<tr style="background:' + rbg + ';">' +
+            '<td style="padding:8px 14px;font-family:monospace;font-weight:700;color:#25477B;">' + escHtml(r.NHTSACampaignNumber) + '</td>' +
+            '<td style="padding:8px 14px;color:#1F2833;">' + escHtml(r.Component) + '</td>' +
+            '<td style="padding:8px 14px;color:#4E677E;white-space:nowrap;">' + escHtml(r.ReportReceivedDate) + '</td>' +
+            '<td style="padding:8px 14px;">' + sev + '</td>' +
+            '<td style="padding:8px 14px;color:#4E677E;max-width:220px;" title="' + escHtml(r.Summary) + '">' + escHtml((r.Summary || '').substring(0,80)) + (r.Summary && r.Summary.length > 80 ? '\u2026' : '') + '</td>' +
+            '<td style="padding:8px 14px;text-align:right;white-space:nowrap;">' +
+              '<button onclick="event.stopPropagation();window._nhtsa&&window._nhtsa.dismiss(\'' + camp + '\');" style="padding:4px 10px;background:#E8F5ED;color:#1B5E30;border:1.5px solid #A8D5B5;border-radius:4px;font-size:11px;font-weight:700;cursor:pointer;font-family:\'Nunito Sans\',sans-serif;">&#10003; Mark Serviced</button>' +
+            '</td></tr>';
+        });
+
+        html += '</tbody></table>';
+        if (dismissed > 0) {
+          html += '<div style="padding:8px 14px;background:#F9FAFB;font-size:11px;color:#8DA4B9;font-family:\'Nunito Sans\',sans-serif;">+ ' + dismissed + ' recall(s) marked as serviced and hidden.</div>';
+        }
+      }
+
+      html += '</td></tr>';
     });
 
     html += '</tbody></table>';
     wrap.innerHTML = html;
   }
 
-  // ── Render: Recall Details ─────────────────────────────────────────────────
+  // ── Render: Recall Details (active + dismissed sections) ──────────────────
   function renderRecallsTab() {
     var wrap = el('nhtsa-recalls-table-wrap');
     if (!wrap) return;
 
-    var campaignMap = {};
+    // Build campaign map for ACTIVE recalls only
+    var activeMap   = {};
+    var dismissedMap = {};
+
     fleetData.forEach(function (v) {
       v.recalls.forEach(function (r) {
         var key = r.NHTSACampaignNumber;
-        if (!campaignMap[key]) {
-          campaignMap[key] = { campaign: r.NHTSACampaignNumber, component: r.Component, date: r.ReportReceivedDate, summary: r.Summary, consequence: r.Consequence, remedy: r.Remedy, notes: r.Notes, parkIt: r.parkIt, parkOutside: r.parkOutSide, vehicles: [] };
-        }
-        campaignMap[key].vehicles.push(v.name + ' (' + v.vin + ')');
+        var target = isDismissed(key) ? dismissedMap : activeMap;
+        if (!target[key]) target[key] = { campaign: key, component: r.Component, date: r.ReportReceivedDate, summary: r.Summary, consequence: r.Consequence, remedy: r.Remedy, notes: r.Notes, parkIt: r.parkIt, parkOutside: r.parkOutSide, vehicles: [] };
+        target[key].vehicles.push(v.name + ' (' + v.vin + ')');
       });
     });
 
-    var campaigns = Object.keys(campaignMap).map(function (k) { return campaignMap[k]; });
+    var active    = Object.keys(activeMap).map(function (k) { return activeMap[k]; });
+    var dismissed = Object.keys(dismissedMap).map(function (k) { return dismissedMap[k]; });
 
-    if (campaigns.length === 0) {
-      wrap.innerHTML = '<p style="padding:32px;text-align:center;color:#1B5E30;margin:0;font-size:14px;font-family:\'Nunito Sans\',sans-serif;">&#10003; No NHTSA recalls found. Check Transport Canada links in Fleet Overview for Canadian recalls.</p>';
-      return;
-    }
-
-    campaigns.sort(function (a, b) {
+    active.sort(function (a, b) {
       if (a.parkIt && !b.parkIt) return -1;
       if (!a.parkIt && b.parkIt) return 1;
       return b.vehicles.length - a.vehicles.length;
     });
 
-    var html = '<table style="width:100%;border-collapse:collapse;font-size:13px;font-family:\'Nunito Sans\',sans-serif;">' +
-      '<thead><tr style="background:#25477B;">' +
-      '<th style="' + thStyle() + 'width:28px;"></th>' +
-      th('Campaign #') + th('Date') + th('Component') +
-      '<th style="' + thStyle() + 'text-align:center;">Vehicles</th>' +
-      th('Severity') + th('Summary') +
-      '</tr></thead><tbody>';
+    var html = '';
 
-    campaigns.forEach(function (c, i) {
-      var bg    = i % 2 === 0 ? '#fff' : '#F9FAFB';
-      var detId = 'ndet-' + i;
-      var sev   = c.parkIt ? '<span style="padding:2px 8px;border-radius:12px;font-size:11px;font-weight:700;background:#FDE8E8;color:#C51A11;">&#9888; Park-It!</span>'
-                : c.parkOutside ? '<span style="padding:2px 8px;border-radius:12px;font-size:11px;font-weight:700;background:#FEF3C7;color:#92400E;">&#9888; Park Outside</span>'
-                : '<span style="padding:2px 8px;border-radius:12px;font-size:11px;font-weight:700;background:#FFF8E1;color:#7A5A00;">Standard</span>';
+    if (active.length === 0) {
+      html += '<p style="padding:32px;text-align:center;color:#1B5E30;margin:0;font-size:14px;font-family:\'Nunito Sans\',sans-serif;">&#10003; No active NHTSA recalls. Check Transport Canada links in Fleet Overview for Canadian recalls.</p>';
+    } else {
+      html += '<table style="width:100%;border-collapse:collapse;font-size:13px;font-family:\'Nunito Sans\',sans-serif;">' +
+        '<thead><tr style="background:#25477B;">' +
+        '<th style="' + thStyle() + 'width:28px;"></th>' +
+        th('Campaign #') + th('Date') + th('Component') +
+        '<th style="' + thStyle() + 'text-align:center;">Vehicles</th>' +
+        th('Severity') + th('Summary') + '<th style="' + thStyle() + '"></th>' +
+        '</tr></thead><tbody>';
 
-      html += '<tr style="background:' + bg + ';cursor:pointer;" onclick="(function(){var d=document.getElementById(\'' + detId + '\');d.style.display=d.style.display===\'none\'?\'table-row\':\'none\';})();">' +
-        '<td style="' + tdStyle() + 'text-align:center;color:#4E677E;">&#9660;</td>' +
-        '<td style="' + tdStyle() + 'font-family:monospace;font-size:12px;font-weight:700;color:#25477B;">' + escHtml(c.campaign) + '</td>' +
-        '<td style="' + tdStyle() + 'white-space:nowrap;color:#4E677E;font-size:12px;">' + escHtml(c.date) + '</td>' +
-        '<td style="' + tdStyle() + 'font-size:12px;">' + escHtml(c.component) + '</td>' +
-        '<td style="' + tdStyle() + 'text-align:center;font-weight:700;color:#0069BF;">' + c.vehicles.length + '</td>' +
-        '<td style="' + tdStyle() + '">' + sev + '</td>' +
-        '<td style="' + tdStyle() + 'color:#4E677E;max-width:260px;" title="' + escHtml(c.summary) + '">' + escHtml((c.summary || '').substring(0, 90)) + (c.summary && c.summary.length > 90 ? '\u2026' : '') + '</td>' +
-        '</tr>';
+      active.forEach(function (c, i) {
+        var bg    = i % 2 === 0 ? '#fff' : '#F9FAFB';
+        var detId = 'ndet-' + i;
+        var sev   = c.parkIt      ? '<span style="padding:2px 8px;border-radius:12px;font-size:11px;font-weight:700;background:#FDE8E8;color:#C51A11;">&#9888; Park-It!</span>'
+                  : c.parkOutside ? '<span style="padding:2px 8px;border-radius:12px;font-size:11px;font-weight:700;background:#FEF3C7;color:#92400E;">&#9888; Park Outside</span>'
+                  : '<span style="padding:2px 8px;border-radius:12px;font-size:11px;font-weight:700;background:#FFF8E1;color:#7A5A00;">Standard</span>';
+        var camp = c.campaign.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
 
-      html += '<tr id="' + detId + '" style="display:none;background:#F2F5F7;">' +
-        '<td colspan="7" style="padding:16px 20px;border-bottom:1px solid #D9E1E8;">' +
-        '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:12px;">' +
-        detailBlock('Full Summary', c.summary, '#1F2833') +
-        detailBlock('Consequence', c.consequence, '#1F2833') +
-        detailBlock('Remedy', c.remedy, '#1B5E30') +
-        (c.notes ? detailBlock('Notes', c.notes, '#4E677E') : '') +
+        html += '<tr style="background:' + bg + ';cursor:pointer;" onclick="(function(){var d=document.getElementById(\'' + detId + '\');d.style.display=d.style.display===\'none\'?\'table-row\':\'none\';})();">' +
+          '<td style="' + tdStyle() + 'text-align:center;color:#4E677E;">&#9660;</td>' +
+          '<td style="' + tdStyle() + 'font-family:monospace;font-size:12px;font-weight:700;color:#25477B;">' + escHtml(c.campaign) + '</td>' +
+          '<td style="' + tdStyle() + 'white-space:nowrap;color:#4E677E;font-size:12px;">' + escHtml(c.date) + '</td>' +
+          '<td style="' + tdStyle() + 'font-size:12px;">' + escHtml(c.component) + '</td>' +
+          '<td style="' + tdStyle() + 'text-align:center;font-weight:700;color:#0069BF;">' + c.vehicles.length + '</td>' +
+          '<td style="' + tdStyle() + '">' + sev + '</td>' +
+          '<td style="' + tdStyle() + 'color:#4E677E;max-width:240px;" title="' + escHtml(c.summary) + '">' + escHtml((c.summary || '').substring(0,90)) + (c.summary && c.summary.length > 90 ? '\u2026' : '') + '</td>' +
+          '<td style="' + tdStyle() + 'text-align:right;" onclick="event.stopPropagation();">' +
+            '<button onclick="window._nhtsa&&window._nhtsa.dismiss(\'' + camp + '\');" style="padding:4px 10px;background:#E8F5ED;color:#1B5E30;border:1.5px solid #A8D5B5;border-radius:4px;font-size:11px;font-weight:700;cursor:pointer;font-family:\'Nunito Sans\',sans-serif;white-space:nowrap;">&#10003; Mark Serviced</button>' +
+          '</td></tr>';
+
+        html += '<tr id="' + detId + '" style="display:none;background:#F2F5F7;">' +
+          '<td colspan="8" style="padding:16px 20px;border-bottom:1px solid #D9E1E8;">' +
+          '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:12px;">' +
+          detailBlock('Full Summary', c.summary, '#1F2833') +
+          detailBlock('Consequence', c.consequence, '#1F2833') +
+          detailBlock('Remedy', c.remedy, '#1B5E30') +
+          (c.notes ? detailBlock('Notes', c.notes, '#4E677E') : '') +
+          '</div>' +
+          '<div style="padding-top:10px;border-top:1px solid #D9E1E8;">' +
+          '<div style="font-size:11px;font-weight:700;color:#4E677E;text-transform:uppercase;margin-bottom:6px;">Affected Fleet Vehicles (' + c.vehicles.length + ')</div>' +
+          '<div style="font-size:12px;color:#1F2833;line-height:1.9;">' + c.vehicles.map(escHtml).join('<br>') + '</div>' +
+          '</div></td></tr>';
+      });
+
+      html += '</tbody></table>';
+    }
+
+    // Dismissed section
+    if (dismissed.length > 0) {
+      html += '<div style="margin-top:20px;border:1.5px solid #D9E1E8;border-radius:8px;overflow:hidden;">' +
+        '<div style="background:#F2F5F7;padding:10px 16px;display:flex;justify-content:space-between;align-items:center;">' +
+        '<span style="font-size:12px;font-weight:700;color:#4E677E;text-transform:uppercase;font-family:\'Nunito Sans\',sans-serif;">&#10003; Serviced / Dismissed (' + dismissed.length + ')</span>' +
+        '<span style="font-size:11px;color:#8DA4B9;font-family:\'Nunito Sans\',sans-serif;">Click Restore to re-activate a recall</span>' +
         '</div>' +
-        '<div style="padding-top:10px;border-top:1px solid #D9E1E8;">' +
-        '<div style="font-size:11px;font-weight:700;color:#4E677E;text-transform:uppercase;margin-bottom:6px;">Affected Fleet Vehicles (' + c.vehicles.length + ')</div>' +
-        '<div style="font-size:12px;color:#1F2833;line-height:1.9;">' + c.vehicles.map(escHtml).join('<br>') + '</div>' +
-        '</div></td></tr>';
-    });
+        '<table style="width:100%;border-collapse:collapse;font-size:12px;font-family:\'Nunito Sans\',sans-serif;">' +
+        '<tbody>';
 
-    html += '</tbody></table>';
+      dismissed.forEach(function (c) {
+        var camp = c.campaign.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+        html += '<tr style="background:#fff;">' +
+          '<td style="padding:9px 14px;font-family:monospace;font-weight:700;color:#8DA4B9;text-decoration:line-through;">' + escHtml(c.campaign) + '</td>' +
+          '<td style="padding:9px 14px;color:#8DA4B9;font-size:12px;">' + escHtml(c.component) + '</td>' +
+          '<td style="padding:9px 14px;color:#8DA4B9;font-size:12px;">' + escHtml(c.date) + '</td>' +
+          '<td style="padding:9px 14px;color:#8DA4B9;font-size:12px;">' + c.vehicles.length + ' vehicle(s)</td>' +
+          '<td style="padding:9px 14px;text-align:right;">' +
+            '<button onclick="window._nhtsa&&window._nhtsa.restore(\'' + camp + '\');" style="padding:4px 10px;background:#fff;color:#C51A11;border:1.5px solid #F5A0A0;border-radius:4px;font-size:11px;font-weight:700;cursor:pointer;font-family:\'Nunito Sans\',sans-serif;">&#8635; Restore</button>' +
+          '</td></tr>';
+      });
+
+      html += '</tbody></table></div>';
+    }
+
     wrap.innerHTML = html;
   }
 
